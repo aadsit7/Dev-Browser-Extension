@@ -134,6 +134,21 @@ original tool — unchanged:
 The manifest grants the host access these fetches need. No servers were
 added, changed, or replaced, and no API keys live in this extension.
 
+WRITE-BACK: every time a checklist item is checked off — automatically by the
+classifier or manually by a tap — the panel also sends one small "log_item"
+event to the same Apps Script backend, which appends a row to the "Checklist
+Log" tab of its Google Sheet: timestamp, session id, the item's text, who
+checked it ("auto" or "you"), the evidence and confidence (auto checks only),
+the progress at that moment (e.g. "3 of 5"), and the install's anonymous id +
+onboarding name. Unchecks and resets are never logged — the sheet is an
+append-only record of what was covered, not a mirror of checkbox state. The
+send is fire-and-forget: if it fails it only warns in the console and the
+call is never disturbed.
+
+The full server-side code for that backend lives in apps-script/Code.gs in
+this folder (it is NOT part of the extension bundle — it's the source to paste
+into the Apps Script project; install steps are in its header comment).
+
 
 HOW IT WAS PACKAGED (notes for maintainers)
 -------------------------------------------
@@ -183,4 +198,7 @@ FILES
   whisper-worker.js      Computer-audio transcription worker (two-way listening)
   lib/transformers/      Vendored Transformers.js + ONNX Runtime (local, for Whisper)
   icons/                 Toolbar/extension icons (16, 48, 128 px)
+  apps-script/Code.gs    Server-side Apps Script source (AI proxy + checklist
+                         log write-back) — deploy to the Apps Script project,
+                         not loaded by the extension
   README.txt             This file
