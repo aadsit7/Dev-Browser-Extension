@@ -112,7 +112,7 @@
       // per-browser. The checklist tool calls it for exactly one thing: the
       // coverage classifier. If you redeploy the Apps Script, update this
       // constant.
-      const GSHEET_WEBHOOK = 'https://script.google.com/macros/s/AKfycbxVbQD6QplZuNlr51IbbMEG4hPr6nW21K20sATktclGrwZLdgfilgGetRRldFC7e5yt/exec';
+      const GSHEET_WEBHOOK = 'https://script.google.com/macros/s/AKfycbyMAaYqBSgYr4JAwhvJhg_GmwhRgS7IL6Nxs72XmLYU52obMydNjZNM55bKfZ50xZjcnw/exec';
 
       // Streaming answer proxy from the original tool. The checklist assistant
       // never streams answers, so nothing calls this endpoint anymore — the
