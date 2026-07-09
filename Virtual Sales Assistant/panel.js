@@ -379,6 +379,7 @@
           it.evidence = '';
           it.checkedAt = Date.now();
           it.noAuto = false;
+          postLogItem(it);
         }
         saveChecklist();
         render();
@@ -387,13 +388,14 @@
       // The ONLY path by which the classifier ticks a box. It can never
       // uncheck anything, never touches an item the seller manually unchecked,
       // and no-ops if the item was checked some other way in the meantime.
-      function autoCheckChecklistItem(id, evidence) {
+      function autoCheckChecklistItem(id, evidence, confidence) {
         const it = CHECKLIST.items.find(x => x.id === id);
         if (!it || it.checked || it.noAuto) return;
         it.checked = true;
         it.checkedBy = 'auto';
         it.evidence = String(evidence || '').trim();
         it.checkedAt = Date.now();
+        postLogItem(it, confidence);
         saveChecklist();
         TECH.answered++;   // "items auto-checked" counter for the status line
         showToast('Covered ✓ ' + truncate(it.text, 60));
@@ -2343,7 +2345,7 @@
               // still-unchecked item, and (3) clear the HIGH confidence bar.
               const accepted = !!item && conf >= ASSIST.CONF_THRESHOLD;
               recordAssistDecision(corrected, accepted, conf, item ? item.text : '');
-              if (accepted) autoCheckChecklistItem(item.id, decision.evidence || '');
+              if (accepted) autoCheckChecklistItem(item.id, decision.evidence || '', conf);
             }
             renderAssistStatus();
             drainUtteranceQueue();
@@ -2495,6 +2497,40 @@
           clearTimeout(timeoutId);
           if (signal) signal.removeEventListener('abort', onAbort);
         }
+      }
+
+      // Fire-and-forget write-back of one checked-off item to the Apps Script
+      // backend ("action":"log_item" → the sheet's "Checklist Log" tab). Called
+      // the moment an item is ticked — by the classifier (covered_by:"auto",
+      // with the evidence + confidence that cleared the bar) or by a manual
+      // tap (covered_by:"you"). Unchecks and resets are never logged: the
+      // sheet is an append-only record of what was covered and when, not a
+      // mirror of the checkbox state. Failures only warn — a logging hiccup
+      // must never disturb the call in progress.
+      function postLogItem(it, confidence) {
+        if (!GSHEET_WEBHOOK || !it) return Promise.resolve();
+        const total = CHECKLIST.items.length;
+        const done = CHECKLIST.items.filter(x => x.checked || x === it).length;
+        return fetch(GSHEET_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'log_item',
+            session_id: SESSION_ID,
+            item_text: it.text || '',
+            covered_by: it.checkedBy || '',
+            evidence: it.evidence || '',
+            confidence: (typeof confidence === 'number') ? confidence : '',
+            progress: done + ' of ' + total,
+            // Usage log only (NOT a model call): pair the event with the
+            // anonymous id AND the captured name so rows in the sheet can be
+            // traced back to a user.
+            user_id: IDENTITY.anonId || '',
+            user_name: identityFullName(),
+            first_name: IDENTITY.userName ? IDENTITY.userName.firstName : '',
+            last_name: IDENTITY.userName ? IDENTITY.userName.lastName : ''
+          })
+        }).catch(err => console.warn('Checklist log failed:', err));
       }
 
       // Fire-and-forget save (the proxy's legacy save action). The checklist
