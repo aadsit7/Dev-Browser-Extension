@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Randy — Recast SE Assistant",
+  "name": "Virtual Sales Assistant",
   "version": "2.0.0",
-  "description": "Voice assistant that listens during calls and answers Recast product questions on screen and aloud.",
+  "description": "Side-panel sales assistant that listens to your live call and automatically checks items off your visual call checklist as each one is genuinely covered.",
   "action": {
-    "default_title": "Randy — Recast SE Assistant",
+    "default_title": "Virtual Sales Assistant",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

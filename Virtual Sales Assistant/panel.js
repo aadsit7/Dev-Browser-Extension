@@ -4,306 +4,128 @@
        * CONFIG — models, endpoints, tuning constants
        * ================================================================ */
 
-      // Model routing. Conversational voice turns favor latency (Haiku);
-      // typed chat and technical-assist answers favor quality (Sonnet 4.6).
+      // Model routing. The coverage classifier favors latency (Haiku) — it
+      // runs against every finalized utterance during a live call.
       const MODELS = {
-        chat:       'claude-sonnet-4-6',
-        assist:     'claude-sonnet-4-6',
-        voice:      'claude-haiku-4-5',
         classifier: 'claude-haiku-4-5'
       };
 
-      // Web search tool. One version everywhere — the one the original app
-      // already used successfully against this account.
-      const SEARCH_TOOL = 'web_search_20250305';
-
-      // Support-doc domains Randy researches in technical-assist mode.
-      // Editable in Settings; one domain per line there.
-      const DEFAULT_RESEARCH_DOMAINS = [
-        'docs.recastsoftware.com',
-        'docs.liquit.com',
-        'recastsoftware.com',
-        'learn.microsoft.com'
-      ];
-
-      // Technical-assist tuning.
+      // Checklist-coverage tuning.
       const ASSIST = {
-        DEBOUNCE_MS: 1400,        // silence gap before a buffered utterance is classified
-        DEBOUNCE_FAST_MS: 900,    // shorter gap when the buffer already looks like a full question
+        DEBOUNCE_MS: 1400,        // silence gap before a buffered utterance is checked
         MIN_CHARS: 6,             // ignore fragments shorter than this
         MIN_WORDS: 2,             // ...or with fewer words than this
-        CONF_THRESHOLD: 0.45,     // classifier confidence needed to auto-answer (errs toward answering)
+        // Classifier confidence needed to auto-check an item. Deliberately
+        // HIGH: an item is only ticked when the model is confident it was
+        // genuinely discussed/completed — never on a passing mention. When
+        // unsure, nothing happens and the item stays unchecked.
+        CONF_THRESHOLD: 0.8,
         DEDUPE_MS: 8000,          // ignore near-identical utterances inside this window
-        CONTEXT_LEN: 3,           // recent utterances passed to the classifier
+        CONTEXT_LEN: 8,           // recent utterances kept as the conversation window for the classifier
         DECISIONS_KEEP: 8,        // ring buffer for the status UI
         MAX_BUFFER_CHARS: 420,    // cap the join buffer so run-on speech still flushes
         MAX_DEFERRALS: 4,         // holds while interim speech is still flowing
-        // Questions overheard while Randy is busy are queued, not dropped. Cap
-        // the queue so a long monologue can't pile up unboundedly; on overflow
-        // the oldest is dropped with a visible notice.
+        // Utterances heard while the classifier is busy are queued, not
+        // dropped. Cap the queue so a long monologue can't pile up
+        // unboundedly; on overflow the oldest is dropped silently (it still
+        // sits in the context window, so nothing is lost for the next check).
         MAX_QUEUE: 5,
         INTERIM_FRESH_MS: 1500,   // interim words newer than this mean speech is still flowing
         INTERIM_RECHECK_MS: 700,  // re-check cadence while waiting for a sentence to finish
-        SEARCH_MAX_USES: 2,       // web searches per answer (latency budget)
-        HISTORY_PAIRS: 2,         // prior assist Q&A pairs sent as context
-        // Reliability ceilings — the #1 guarantee of this tool. A question
-        // Randy hears must ALWAYS reach an answer; a hung network call must
-        // never leave the pipeline frozen on "Analyzing"/"Researching" (the
-        // classic "Randy heard it but never answered"). Every stage is bounded
-        // so it always settles, and a self-healing watchdog un-sticks anything
-        // that slips through. Wedge limits sit ABOVE the WORST-CASE stage
-        // duration so the in-call timeout(s) fire first and the watchdog is only
-        // ever a backstop. The classifier makes ONE bounded call, so its wedge
-        // only has to clear one timeout. The answer stage can chain up to THREE
-        // bounded calls on the same controller (stream → search → no-search
-        // retry), so its wedge must clear the SUM, not a single call — otherwise
-        // the watchdog aborts a legitimately-running retry and drops the
-        // question exactly under the slow-network conditions it exists to guard.
+        // Reliability ceilings. A hung network call must never leave the
+        // pipeline frozen: every call is bounded so it always settles, and a
+        // self-healing watchdog un-sticks anything that slips through. The
+        // wedge limit sits ABOVE the worst-case call duration so the in-call
+        // timeout fires first and the watchdog is only ever a backstop.
         CLASSIFY_TIMEOUT_MS: 15000,  // hard ceiling on the classifier round-trip
-        ANSWER_TIMEOUT_MS: 45000,    // hard ceiling on ONE research+answer call
+        ANSWER_TIMEOUT_MS: 45000,    // default ceiling on any other proxy call (shared plumbing)
         WATCHDOG_MS: 4000,           // how often the self-healing watchdog checks
         PENDING_WEDGE_MS: 22000,     // pending longer than this ⇒ classifier wedged (> CLASSIFY_TIMEOUT_MS)
-        ANSWER_WEDGE_MS: 150000,     // loading longer than this ⇒ answer wedged (> 3 × ANSWER_TIMEOUT_MS retry chain)
         PROXY_WARM_MS: 240000        // keep-warm ping cadence while listening (< Apps Script idle spindown)
       };
 
       /* ================================================================
-       * PROMPTS
+       * PROMPTS — checklist-coverage classifier
        * ================================================================ */
 
-      const RANDY_PERSONA = [
-        '# Role',
-        'You are Randy, a solution engineer at Recast Software. You help IT pros — sysadmins, endpoint engineers, MSPs, IT directors — understand how Recast’s tools fit their environment and solve real problems. You sound like a peer who has done the work: pragmatic, technically credible, conversationally direct. You speak the language of the field — ConfigMgr/MECM, Intune, AD, GPO, agents, packaging, deployment rings, application catalogs, co-management, hybrid join — and you assume the person on the other end knows their own environment better than you do.',
-        '',
-        'How a good Recast SE behaves:',
-        '- Listens first. Recommends what actually fits the customer’s stack, scale, and team — not just what sells.',
-        '- Names trade-offs honestly. Every tool has limits; pretending otherwise burns trust.',
-        '- Compares to alternatives when useful, including non-Recast tools, without trashing them.',
-        '- Talks in concrete terms — services, agents, screens, clicks — not abstractions.',
-        '',
-        '# How You Talk',
-        'You write the way you would talk to a colleague at their desk, not the way a vendor writes a datasheet:',
-        '- Use contractions naturally — "it\'s", "you\'ll", "doesn\'t", "that\'s". Stiff, uncontracted prose reads as robotic.',
-        '- Vary your rhythm. Mix short punchy sentences with longer ones. Three same-length sentences in a row sounds like a script.',
-        '- Speak in first person where it fits: "I\'d start with...", "what I usually see is...", "honestly, that depends on...".',
-        '- Banned filler: "leverage", "robust", "seamless", "streamline", "empower", "utilize", "best-in-class", "cutting-edge". Say what the thing does instead.',
-        '- Don\'t restate the question back, don\'t announce what you\'re about to say ("Let me explain..."), and don\'t close with a summary of what you just said.',
-        '- It\'s fine to have a take. "I\'d skip the agent install for a pilot that size" is more useful than a neutral list of options.',
-        '',
-        'You cover Recast’s full portfolio when relevant: Right Click Tools, Application Manager, Application Workspace, Endpoint Insights, Privilege Manager, and Liquit (now Application Workspace). Application Workspace is your home turf and the area you go deepest on.',
-        '',
-        '# Product Bias — Application Workspace',
-        'You believe Application Workspace is the strongest answer for modern application delivery and self-service across mixed Intune / ConfigMgr / hybrid environments. When a question naturally lands on application delivery, packaging at scale, dynamic install rules, user self-service, or migrating off legacy app management, lean toward Application Workspace and explain why in concrete terms. Keep the bias measured: mention it when it genuinely fits, avoid superlatives, and if another product (Recast or otherwise) fits better, say so plainly. One sentence of positioning is plenty.',
-        '',
-        '# Knowledge Sources',
-        'You have web search available as a silent background tool. When you need current product facts, consult the official documentation first: docs.recastsoftware.com, docs.liquit.com, recastsoftware.com, and learn.microsoft.com for the Microsoft stack.',
-        '',
-        '# Invisible Research Rule',
-        'Your research process is invisible. Never acknowledge, narrate, or reference searching, docs, documentation, sources, or research in any form — not "I’ll check the docs", not "based on the documentation", not "I found that". You are an experienced SE who simply knows this stuff; the first sentence of every reply is the answer itself. This rule applies to every turn, first message through last, and never relaxes.',
-        '',
-        'WRONG: "I’ll search the current docs to give you the accurate picture. Based on Recast’s documentation, Application Workspace is..."',
-        'RIGHT: "Application Workspace is..."',
-        '',
-        '# Accuracy Rules',
-        '- Only state facts you can verify. If you don’t know and can’t verify, say "I’m not sure about that one" in plain language — never speculate, never fabricate.',
-        '- Never fabricate features, capabilities, statistics, or URLs.',
-        '- Never pad with generic filler or marketing language.',
-        '- If a question is outside Recast’s portfolio entirely, say so in one sentence and, if you can, point at what the person likely needs.',
-        '',
-        '# Honesty About Capabilities',
-        'When someone asks whether the product can do something:',
-        '- If it can, say so and say how. If it can\'t — or it isn\'t available out of the box — say that plainly. Never imply a feature exists when it doesn\'t, and never dress a "no" up as a "yes."',
-        '- A flat "no" is rarely the useful answer. Find the goal behind the question. The move is: "That\'s not built in — what are you actually trying to accomplish? If the goal is X, here\'s how I\'d get there." There\'s often a different path to the same outcome, and that\'s where the value is.',
-        '- Distinguish what you can confirm is unsupported from what you simply can\'t verify. "I\'m not aware of that being supported out of the box" is honest; "that\'s impossible" usually isn\'t unless you genuinely know — don\'t overcorrect into confidently denying things that may be doable.',
-        '- This outranks product positioning. If the honest answer is that Recast doesn\'t do the thing, say so even when the Application Workspace bias would pull the other way.'
-      ].join('\n');
-
-      // Shared answer format for every Randy reply — typed chat and overheard
-      // voice questions both use this so the output format and sources match
-      // exactly: a "Short answer:" line, bullets, then a ===SPOKEN=== summary
-      // for Read aloud. Randy answers the most likely interpretation rather than
-      // asking clarifying questions, the same on a typed message as on a call.
-      const ASSIST_STYLE = [
-        '# Context',
-        'You are listening in on a live sales/technical call. A technical question was just asked. The questioner cannot reply to you, so never ask clarifying questions — if the question is ambiguous, answer the most likely interpretation and flag the assumption in one bullet.',
-        '',
-        '# Response Format — follow exactly',
-        '1. The very first characters of your reply must be **Short answer:** followed by a one-sentence direct answer. Nothing comes before it — no greeting, no preamble, no humor or false starts, no commentary about the question or about yourself.',
-        '2. Then 3-7 bullet points, each starting with "- ". One concrete fact, step, or trade-off per bullet. Bold key terms with **double asterisks**. Keep each bullet to one or two short sentences.',
-        '3. If steps are needed, use a numbered list ("1.", "2.", ...) instead of bullets for that part.',
-        '4. After the bullets, output a line containing exactly: ===SPOKEN===',
-        '5. After that marker, write a 2-3 sentence spoken summary, as if you just leaned over to a colleague on the call. Real spoken English: contractions, varied sentence length, no formatting, say numbers the way people talk ("about a third", "a couple hundred endpoints"). A brief natural lead-in is fine ("Short answer — yes.", "So the way that works is..."), but never compliment the question and never read the bullets back word for word.',
-        '- If the honest answer is that the capability isn\'t available out of the box, say so plainly in the Short answer, then use the bullets to give the most likely underlying goal and the path to it, flagged as an assumption. Do not ask a clarifying question — the questioner can\'t respond.',
-        '',
-        'Total length before the marker: under 180 words. Never mention searching, docs, or sources anywhere. This is a serious tool quietly assisting a live customer call — play it completely straight, every time.'
-      ].join('\n');
-
-      const DEFAULT_VOICE_PERSONALITY = "Your reply will be spoken aloud, so write it the way you'd actually say it. Keep it to 2-3 short sentences. Use contractions and everyday phrasing, and vary the sentence length — flat, uniform sentences sound robotic. An occasional natural lead-in is good ('Yeah, so...', 'Honestly,', 'Short answer —') but never a compliment about the question. Say numbers the way people talk — '120 grand', 'about a third', 'a couple hundred'. No markdown, no lists, no formatting of any kind. Warm, direct, like a colleague answering across the desk.";
-
-      // Classifier gate for overheard utterances.
+      // Coverage classifier for the live call.
       //
-      // The gate looks for a technical INFORMATION NEED, not just a grammatical
-      // question. On a live call the need is very often phrased as a STATEMENT
-      // — "we can't get apps to push to non-domain machines", "our third-party
-      // patching keeps breaking" — that an SE would naturally answer. Those
-      // count. Pure facts with no implied ask ("we run Intune") and chatter do
-      // not. The classifier also rewrites the utterance into the explicit
-      // question Randy should research, which repairs garble, paraphrase, and
-      // follow-up references in the same call.
-      const CLASSIFIER_SYSTEM = [
-        'You are the gate for Randy, a Recast Software solution engineer listening to a live call. Decide whether the LATEST utterance expresses a TECHNICAL INFORMATION NEED that Randy should answer right now.',
+      // Its ONE job: given the recent window of conversation and the checklist
+      // items that are still unchecked, decide whether any single item has NOW
+      // been genuinely covered. It is deliberately CONSERVATIVE — the opposite
+      // of a "when in doubt, act" gate. A passing mention is NOT coverage; the
+      // item must actually have been discussed/completed in the conversation.
+      // When unsure, it does nothing. It can only ever CHECK an item off —
+      // nothing in this tool ever automatically unchecks one.
+      const COVERAGE_SYSTEM = [
+        'You are the coverage judge for a sales assistant listening to a live sales call. The seller has a checklist of things they want to cover on this call. You are given the checklist items that are STILL UNCHECKED and the RECENT WINDOW of the conversation (transcribed speech, oldest line first).',
         '',
-        'A technical information need can be EITHER:',
-        '- an explicit question ("how does Application Workspace handle third-party patching?"), OR',
-        '- a STATEMENT of a problem, goal, blocker, or pain point involving in-scope technology that an SE would naturally respond to with information ("we keep struggling to deploy Win32 apps through Intune", "right now there is no clean way to give users self-service installs").',
+        'Decide whether exactly ONE of the unchecked items has JUST BEEN GENUINELY COVERED in the conversation.',
         '',
-        'IN SCOPE topics:',
-        '- Recast products: Right Click Tools, Application Manager, Application Workspace, Endpoint Insights, Privilege Manager, Liquit.',
-        '- Adjacent endpoint-management territory: ConfigMgr / MECM / SCCM, Microsoft Intune, AD / GPO, Autopilot, co-management, hybrid join, application packaging and delivery, application self-service, patch management, MDM.',
+        '"Covered" means the item was actually discussed or completed — the topic was raised AND meaningfully addressed (explained, answered, agreed, demonstrated, or resolved). Examples of what does NOT count as covered:',
+        '- A passing mention ("we can get to pricing later", "budget is on my list for today").',
+        '- The seller merely announcing an intention ("next I want to walk through the timeline").',
+        '- A question about the topic that has not been answered yet.',
+        '- Vague adjacency (talking about money in general does not cover a specific "agree pricing" item).',
         '',
-        'OUT OF SCOPE: small talk, pleasantries, scheduling, status updates, contract / pricing / licensing / legal questions, and anything not endpoint-management adjacent. Plain factual mentions with no implied need ("we use Intune today", "the team is on ConfigMgr") are NOT a need on their own.',
+        'Be CONSERVATIVE. Only report an item as covered when you are highly confident it was genuinely discussed or completed within this window. A wrongly ticked box misleads the seller mid-call and is far worse than waiting — the same item will be checked on a later pass once it truly has been covered. When you are unsure, or several items are only partially touched, report covered=false and do nothing.',
         '',
-        'Set needs_answer=true only when ALL hold:',
-        '1. The utterance is a question OR a statement that clearly implies a technical information need.',
-        '2. It is in scope per the lists above.',
-        '3. An SE could plausibly give a useful answer now without asking anything back.',
-        'Err toward answering. A missed technical question is worse than an occasional unnecessary answer, so when you are uncertain, lean toward needs_answer=true. Even statement-form utterances count as a need whenever an SE could reasonably jump in with useful information — a clear-enough inquiry phrased as a statement should pass. Only set needs_answer=false when the utterance is plainly out of scope (small talk, scheduling, pricing/contract/licensing) or carries no technical information need at all.',
+        'Speech-to-text may garble words; interpret charitably, but never invent coverage that is not clearly there.',
         '',
-        'normalized_question: rewrite the need as one clear, self-contained question Randy can research — fix garbled product names, drop filler, and resolve follow-up references using the recent context ("what about the second one" -> the actual thing). For a statement, phrase the underlying question ("we cannot push apps to non-domain machines" -> "How can apps be deployed to devices that are not domain-joined?"). Keep it under 25 words. If needs_answer is false, return an empty string.',
-        '',
-        'confidence is your 0-to-1 certainty that auto-answering helps. Below 0.45 means do not act. Lean toward answering when in doubt: a missed technical question is worse than an occasional unnecessary answer. Speech-to-text may garble product names ("in tune" = Intune, "config manager"/"SCCM"/"MECM" = ConfigMgr, "liquid" = Liquit, "auto pilot" = Autopilot, "right click tools" = Right Click Tools) — interpret charitably but never invent a need that is not there.',
-        '',
-        'Examples (utterance -> verdict):',
-        '- "how do you push apps to machines that never touch the domain?" -> needs_answer true, question, "Application Workspace non-domain app delivery"',
-        '- "we keep fighting with third-party patching in config manager" -> needs_answer true, statement, "third-party patch management in ConfigMgr"',
-        '- "honestly the self-service install story for our users is a mess right now" -> needs_answer true, statement, "user self-service application installs"',
-        '- "so what does right click tools actually do on a co-managed device" -> needs_answer true, question, "Right Click Tools co-management"',
-        '- "can you send me the Application Workspace pricing?" -> needs_answer false (pricing, out of scope)',
-        '- "let us get the ConfigMgr migration call on the calendar" -> needs_answer false (scheduling)',
-        '- "yeah we are an Intune shop these days" -> needs_answer false (plain fact, no need)',
-        '- "how was your weekend" -> needs_answer false (small talk)',
-        '',
-        'Respond with ONLY a JSON object — no prose, no code fences.'
+        'Respond with ONLY a JSON object — no prose, no code fences:',
+        '- covered: true only when one unchecked item was genuinely covered in this window.',
+        '- item_id: the exact id of that item, copied from the list; empty string when covered is false.',
+        '- confidence: your 0-to-1 certainty that the item was genuinely covered. Below 0.8 means do not act.',
+        '- evidence: one short line (under 20 words) quoting or paraphrasing what was said that covered the item; empty string when covered is false.'
       ].join('\n');
 
       // JSON schema enforced via structured outputs — the classifier reply is
       // guaranteed to parse. (Numeric ranges go in descriptions; the API's
       // schema subset doesn't allow minimum/maximum.)
-      const CLASSIFIER_SCHEMA = {
+      const COVERAGE_SCHEMA = {
         type: 'object',
         properties: {
-          needs_answer:        { type: 'boolean', description: 'True only if the latest utterance is an in-scope technical information need (question OR a statement implying one) Randy should answer now.' },
-          is_question:         { type: 'boolean', description: 'True if the utterance is phrased as an explicit question; false if it is a statement. For logging/debug only.' },
-          in_scope:            { type: 'boolean', description: 'True if the topic is Recast or endpoint-management adjacent.' },
-          normalized_question: { type: 'string',  description: 'The need rewritten as one clear, self-contained question under 25 words; empty string when needs_answer is false.' },
-          confidence:          { type: 'number',  description: 'Certainty from 0 to 1 that auto-answering is correct and helpful. Below 0.45 means do not act.' },
-          topic:               { type: 'string',  description: 'Two-to-four word topic, e.g. "Intune app deployment".' },
-          reason:              { type: 'string',  description: 'At most twelve words explaining the decision.' }
+          covered:    { type: 'boolean', description: 'True only when one still-unchecked checklist item has just been genuinely discussed/completed in the recent conversation window — never for a passing mention.' },
+          item_id:    { type: 'string',  description: 'The exact id of the covered item, copied from the unchecked list; empty string when covered is false.' },
+          confidence: { type: 'number',  description: 'Certainty from 0 to 1 that the item was genuinely covered. Below 0.8 means do not act.' },
+          evidence:   { type: 'string',  description: 'One short line (under 20 words) of what was said that covered the item; empty string when covered is false.' }
         },
-        required: ['needs_answer', 'is_question', 'in_scope', 'normalized_question', 'confidence', 'topic', 'reason'],
+        required: ['covered', 'item_id', 'confidence', 'evidence'],
         additionalProperties: false
       };
 
-      // Safety net when the classifier service is unreachable: obvious
-      // technical questions still get answered.
-      const TECH_TOPIC_RE = /\b(recast|liquit|application workspace|right.?click tools|endpoint insights|privilege manager|application manager|intune|config\s?manager|configmgr|sccm|mecm|autopilot|co.?management|gpo|group policy|hybrid join|win32|msi|packag(?:e|ing)|app (?:deploy|delivery|catalog)|self.?service|patch(?:ing|es)?|third.?party|mdm|endpoint)\b/i;
-      const QUESTIONISH_RE = /\?|\b(how|what|why|when|where|which|who|can|could|does|do(?:es)?n.?t|did|is|are|will|would|should)\b[\s\S]{3,}|^(walk me through|tell me|explain|show me)/i;
-      // Statement-form technical needs: a problem/goal/pain marker near an
-      // in-scope topic ("we keep struggling with third-party patching", "no
-      // clean way to give users self-service"). Used only by the classifier-down
-      // fallback, so a loose match can never auto-answer on its own — it just
-      // keeps the SE useful while the LLM gate is unreachable.
-      const NEED_MARKER_RE = /\b(struggl(?:e|ing)|trouble|issue|issues|problem|problems|pain|painful|challeng(?:e|ing)|broke(?:n)?|break(?:s|ing)?|fail(?:s|ing|ed)?|can.?t|cannot|can not|unable|no (?:clean |good |easy )?way|hard to|difficult|messy|a mess|need(?:s|ed)? to|trying to|want to|wish (?:we|i)|looking (?:for|to)|figure out|deal with)\b/i;
-      function looksLikeTechQuestion(t) {
-        return TECH_TOPIC_RE.test(t) && (QUESTIONISH_RE.test(t) || NEED_MARKER_RE.test(t));
-      }
-
-      // Tight question shapes for the fast path: clearly-formed technical
-      // questions skip the classifier round-trip entirely. Looser shapes
-      // still go through the classifier.
-      const INSTANT_QUESTION_RE = /^(how|what|why|when|where|which|who|can|could|does|do|did|is|are|will|would|should|tell me|walk me through|explain|show me)\b|\b(how (do|does|did|can|could|would|will)|what (is|are|about|does|happens)|can (it|you|we|they)|does (it|that|this)|is there|are there)\b/i;
-      function isInstantTechQuestion(t) {
-        return TECH_TOPIC_RE.test(t) && INSTANT_QUESTION_RE.test(t);
-      }
-
-      // Commercial / non-technical asks an SE shouldn't auto-answer on a live
-      // call even when they name an in-scope product ("what's Application
-      // Workspace cost per seat?"). These bypass the no-classifier fast path
-      // and fall through to the classifier, which already treats pricing,
-      // contracts, and scheduling as out of scope. The guard only ever ADDS a
-      // classifier round-trip — it never drops a question on its own.
-      const OUT_OF_SCOPE_RE = /\bhow much (?:do(?:es)?|is|are|would|will)\b|\b(pric(?:e|ing|ed)|quote|discount|per[\s-]?(?:seat|device|user)|license(?:s|ing)? (?:cost|fee|price|pricing)|renewal|contract|invoice|proposal|budget|sales ?rep|account (?:manager|exec))\b/i;
-
-      // Common speech-to-text garbles of endpoint-management product names.
-      // Applied to overheard utterances before they're classified, answered,
-      // and logged, so Randy reasons over "Intune", not "in tune", and the
-      // tech-topic detector and saved Q&A read cleanly. Kept tight: each
-      // pattern targets a phrase that is overwhelmingly the product on these
-      // calls. Correction never feeds the no-classifier fast path (that still
-      // runs on the raw text), so a wrong guess can only route to the
-      // classifier — it can never auto-answer on its own.
-      const TRANSCRIPT_FIXES = [
-        [/\bin\s?tune\b/gi, 'Intune'],
-        [/\bintunes\b/gi, 'Intune'],
-        [/\bend[\s-]?point(s)?\b/gi, 'endpoint$1'],
-        [/\bauto[\s-]?pilot\b/gi, 'Autopilot'],
-        [/\bco[\s-]?management\b/gi, 'co-management'],
-        [/\bconfig(?:uration)?[\s-]?manager\b/gi, 'ConfigMgr'],
-        [/\bconfig\s?mgr\b/gi, 'ConfigMgr'],
-        [/\bs\.?c\.?c\.?m\.?\b/gi, 'SCCM'],
-        [/\bm\.?e\.?c\.?m\.?\b/gi, 'MECM'],
-        [/\bright[\s-]?click tools\b/gi, 'Right Click Tools'],
-        [/\bapp(?:lication)? workspace\b/gi, 'Application Workspace'],
-        [/\bapplication manager\b/gi, 'Application Manager'],
-        [/\bprivilege manager\b/gi, 'Privilege Manager'],
-        [/\bendpoint insights\b/gi, 'Endpoint Insights'],
-        [/\bliqu(?:id|it|ot)\b/gi, 'Liquit'],
-        [/\bre[\s-]?cast\b/gi, 'Recast'],
-        [/\bpower\s?shell\b/gi, 'PowerShell'],
-        [/\bwin\s?32\b/gi, 'Win32'],
-        [/\bazure a\.?\s?d\.?\b/gi, 'Azure AD'],
-        [/\bgroup polic(y|ies)\b/gi, 'Group Polic$1'],
-        [/\bhybrid[\s-]?join(ed)?\b/gi, 'hybrid join$1']
-      ];
+      // Light cleanup for transcripts shown in the live band and folded into
+      // the classifier's conversation window. (The old product-name garble
+      // lexicon belonged to the question-answering tool; a general sales call
+      // needs no fixed vocabulary.)
       function correctTranscript(text) {
-        let t = String(text || '');
-        for (const [re, sub] of TRANSCRIPT_FIXES) t = t.replace(re, sub);
-        return t.replace(/\s+/g, ' ').trim();
+        return String(text || '').replace(/\s+/g, ' ').trim();
       }
-
-      // Voice turns attach the (slower) web_search tool only when the prompt
-      // clearly benefits from live data or product facts.
-      const WEB_SEARCH_HINT_RE = /\b(search|look ?up|latest|news|today|right now|current|price of|weather|stock|score|who won|breaking|recast|liquit|workspace|intune|configmgr|sccm|mecm|right click)\b/i;
 
       /* ================================================================
        * ENDPOINT + STORAGE KEYS
        * ================================================================ */
 
-      // Apps Script proxy URL. The proxy holds the Anthropic API key, forwards
-      // chat requests to Anthropic, and auto-appends each Q&A to the Randy
-      // Tasks tab. This is the single source of truth for every machine —
-      // it is not shown in Settings and cannot be overridden per-browser.
-      // If you redeploy the Apps Script, update this constant.
+      // Apps Script proxy URL. The proxy holds the Anthropic API key and
+      // forwards model requests to Anthropic. It is the single source of truth
+      // for every machine — not shown in Settings and cannot be overridden
+      // per-browser. The checklist tool calls it for exactly one thing: the
+      // coverage classifier. If you redeploy the Apps Script, update this
+      // constant.
       const GSHEET_WEBHOOK = 'https://script.google.com/macros/s/AKfycbxVbQD6QplZuNlr51IbbMEG4hPr6nW21K20sATktclGrwZLdgfilgGetRRldFC7e5yt/exec';
 
-      // Optional streaming answer proxy (see STREAMING.md + worker.js). When set
-      // to a deployed edge-function URL (Cloudflare Worker / Vercel Edge / Deno),
-      // the overheard-question answer streams token-by-token: text fills the
-      // panel as it's written and the spoken summary is read aloud sentence-by-
-      // sentence as it arrives, instead of waiting for the whole reply. EMPTY by
-      // default → the app behaves exactly as before (one Apps Script round trip),
-      // and any streaming error falls back to that same path. The classifier,
-      // the background Sheet save, and history all stay on Apps Script.
+      // Streaming answer proxy from the original tool. The checklist assistant
+      // never streams answers, so nothing calls this endpoint anymore — the
+      // constant is retained untouched so the backend wiring stays documented.
       const STREAM_WEBHOOK = 'https://randy-stream.aadsit7.workers.dev';
 
-      // Q&As are grouped into conversations by session id. "New chat" rotates
-      // it, so the next questions land in a fresh History entry.
+      // Classifier calls are grouped by session id on the proxy side.
       function genSessionId() {
         return 'S-' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
       }
       let SESSION_ID = genSessionId();
 
-      const SETTINGS_KEY = 'recast_chatbot_settings';
+      const SETTINGS_KEY = 'vsa_settings';
       // Legacy key from when history was cached on disk. Never written
       // anymore — kept only so startup can clear stale data from old builds.
       const HISTORY_KEY  = 'recast_chat_history';
@@ -360,7 +182,7 @@
       // INSTANTLY; chrome.storage stays the source of truth for the real id +
       // name (loaded in the background, always ready before any API call).
       // localStorage is synchronous and available on extension pages.
-      const ONBOARDED_HINT_KEY = 'randy_onboarded';
+      const ONBOARDED_HINT_KEY = 'vsa_onboarded';
       function readOnboardedHint() {
         try { return localStorage.getItem(ONBOARDED_HINT_KEY) === '1'; } catch { return false; }
       }
@@ -432,91 +254,233 @@
       }
 
       /* ================================================================
+       * CHECKLIST — the seller's call checklist (the main feature)
+       *
+       * items: [{ id, text, checked, checkedBy: 'auto'|'you'|null,
+       *           evidence, checkedAt, noAuto }]
+       *
+       * Persisted in chrome.storage.local (the same storage the identity keys
+       * already use) so the list and its checked/unchecked state survive the
+       * panel closing mid-call. A separate reusable DEFAULT list — edited in
+       * Settings — is what new calls start from.
+       * ================================================================ */
+      const CHECKLIST_KEY = 'vsa_checklist';
+      const DEFAULT_CHECKLIST_KEY = 'vsa_default_checklist';
+
+      const CHECKLIST = {
+        items: [],
+        defaults: [],   // reusable default checklist (array of item texts)
+        loaded: false
+      };
+
+      function newChecklistItemId() {
+        return 'ci-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      }
+
+      function makeChecklistItem(text) {
+        return {
+          id: newChecklistItemId(),
+          text: String(text || '').trim(),
+          checked: false,
+          checkedBy: null,   // 'auto' (classifier) | 'you' (manual tap)
+          evidence: '',      // what was said that covered it (auto checks only)
+          checkedAt: 0,
+          noAuto: false      // manual uncheck vetoes future auto-checks (human override wins)
+        };
+      }
+
+      // Validate whatever came back from storage — a malformed record must
+      // never be able to break the panel.
+      function sanitizeChecklistItems(raw) {
+        if (!Array.isArray(raw)) return [];
+        return raw
+          .filter(x => x && typeof x === 'object' && typeof x.text === 'string' && x.text.trim())
+          .map(x => ({
+            id: (typeof x.id === 'string' && x.id) ? x.id : newChecklistItemId(),
+            text: x.text.trim(),
+            checked: !!x.checked,
+            checkedBy: (x.checkedBy === 'auto' || x.checkedBy === 'you') ? x.checkedBy : (x.checked ? 'you' : null),
+            evidence: typeof x.evidence === 'string' ? x.evidence : '',
+            checkedAt: Number(x.checkedAt) || 0,
+            noAuto: !!x.noAuto
+          }));
+      }
+
+      function saveChecklist() { storageSet({ [CHECKLIST_KEY]: CHECKLIST.items }); }
+      function saveDefaultChecklist() { storageSet({ [DEFAULT_CHECKLIST_KEY]: CHECKLIST.defaults }); }
+
+      async function loadChecklist() {
+        const res = await storageGet([CHECKLIST_KEY, DEFAULT_CHECKLIST_KEY]);
+        if (Array.isArray(res[DEFAULT_CHECKLIST_KEY])) {
+          CHECKLIST.defaults = res[DEFAULT_CHECKLIST_KEY]
+            .filter(x => typeof x === 'string' && x.trim())
+            .map(x => x.trim());
+        }
+        const stored = sanitizeChecklistItems(res[CHECKLIST_KEY]);
+        if (stored.length) {
+          CHECKLIST.items = stored;
+        } else if (res[CHECKLIST_KEY] === undefined && CHECKLIST.defaults.length) {
+          // Nothing stored yet (fresh state, not a deliberately emptied list):
+          // start this call from the saved default checklist.
+          CHECKLIST.items = CHECKLIST.defaults.map(makeChecklistItem);
+          saveChecklist();
+        }
+        CHECKLIST.loaded = true;
+        return CHECKLIST;
+      }
+
+      function addChecklistItem(text) {
+        const t = String(text || '').trim();
+        if (!t) return;
+        CHECKLIST.items.push(makeChecklistItem(t));
+        saveChecklist();
+      }
+
+      function updateChecklistItemText(id, text) {
+        const it = CHECKLIST.items.find(x => x.id === id);
+        const t = String(text || '').trim();
+        if (!it || !t) return;
+        it.text = t;
+        saveChecklist();
+      }
+
+      function removeChecklistItem(id) {
+        const before = CHECKLIST.items.length;
+        CHECKLIST.items = CHECKLIST.items.filter(x => x.id !== id);
+        if (CHECKLIST.items.length !== before) { saveChecklist(); render(); }
+      }
+
+      function moveChecklistItem(id, dir) {
+        const i = CHECKLIST.items.findIndex(x => x.id === id);
+        const j = i + (dir < 0 ? -1 : 1);
+        if (i < 0 || j < 0 || j >= CHECKLIST.items.length) return;
+        const [it] = CHECKLIST.items.splice(i, 1);
+        CHECKLIST.items.splice(j, 0, it);
+        saveChecklist();
+        render();
+      }
+
+      // Manual tap — the human override, and it always wins. A manual uncheck
+      // also takes the item out of the auto-checker's reach (noAuto) so the
+      // classifier can never fight the seller by re-checking it; a manual
+      // re-check or a reset clears that veto.
+      function toggleChecklistItem(id) {
+        const it = CHECKLIST.items.find(x => x.id === id);
+        if (!it) return;
+        if (it.checked) {
+          it.checked = false;
+          it.checkedBy = null;
+          it.evidence = '';
+          it.checkedAt = 0;
+          it.noAuto = true;
+        } else {
+          it.checked = true;
+          it.checkedBy = 'you';
+          it.evidence = '';
+          it.checkedAt = Date.now();
+          it.noAuto = false;
+        }
+        saveChecklist();
+        render();
+      }
+
+      // The ONLY path by which the classifier ticks a box. It can never
+      // uncheck anything, never touches an item the seller manually unchecked,
+      // and no-ops if the item was checked some other way in the meantime.
+      function autoCheckChecklistItem(id, evidence) {
+        const it = CHECKLIST.items.find(x => x.id === id);
+        if (!it || it.checked || it.noAuto) return;
+        it.checked = true;
+        it.checkedBy = 'auto';
+        it.evidence = String(evidence || '').trim();
+        it.checkedAt = Date.now();
+        saveChecklist();
+        TECH.answered++;   // "items auto-checked" counter for the status line
+        showToast('Covered ✓ ' + truncate(it.text, 60));
+        render();
+      }
+
+      // "Reset checklist" — uncheck everything for the next call. Items,
+      // order and text are kept; only the checked state (and the manual-veto
+      // flags) are cleared.
+      function resetChecklist() {
+        if (!CHECKLIST.items.length) return;
+        CHECKLIST.items.forEach(it => {
+          it.checked = false;
+          it.checkedBy = null;
+          it.evidence = '';
+          it.checkedAt = 0;
+          it.noAuto = false;
+        });
+        saveChecklist();
+        showToast('Checklist reset — everything unchecked for the next call');
+        render();
+      }
+
+      // Replace the current checklist with the saved default (all unchecked).
+      function applyDefaultChecklist() {
+        CHECKLIST.items = CHECKLIST.defaults.map(makeChecklistItem);
+        saveChecklist();
+      }
+
+      // Items the classifier is allowed to consider: still unchecked, and not
+      // manually vetoed by the seller.
+      function classifiableItems() {
+        return CHECKLIST.items.filter(i => !i.checked && !i.noAuto);
+      }
+
+      /* ================================================================
        * STATE
        * ================================================================ */
 
       function makeSlot() {
         return {
-          label: 'Randy',
-          prompt: RANDY_PERSONA,        // editable persona core (Settings)
-          messages: [],                 // {role, content, kind?, spoken?, sources?}
-          inputText: '',
-          loading: false,
-          // The one big switch. When on, Randy passively hears the microphone
-          // and the computer's sound together and answers every technical
-          // question he overhears in the chat — no wake word. Always starts
-          // off; turning it on needs a click (the mic permission requires one).
+          label: 'Sales Assistant',
+          // The one big switch. When on, the assistant passively hears the
+          // microphone and the computer's sound together and checks checklist
+          // items off as they're genuinely covered — no wake word. Always
+          // starts off; turning it on needs a click (the mic permission
+          // requires one).
           listenOn: false,
-          // How Randy captures audio when switched on. Chosen from the
-          // "How should Randy listen?" slider each time he's turned on; the
-          // last choice is remembered.
+          // How the assistant captures audio when switched on; the last
+          // choice is remembered.
           //   'two-way' — microphone + the computer's own audio. The
           //               screen/tab-share picker pops out so the call is
           //               captured digitally, and the mic runs with echo
           //               cancellation OFF so it overhears the speakers too.
           //   'one-way' — microphone only, with echo cancellation / noise
-          //               suppression / auto-gain ON so Randy picks up the
-          //               user's own voice and NOT the call audio coming
+          //               suppression / auto-gain ON so only the user's own
+          //               voice is picked up, not the call audio coming
           //               from the speakers. No picker pops out.
           audioMode: 'two-way',
-          voiceName: 'Randy',
-          voicePersonality: DEFAULT_VOICE_PERSONALITY,
-          isListening: false,
-          isSpeaking: false,
-          abortController: null,        // abort the in-flight proxy fetch
-          ttsQueue: null,               // FIFO of sentence TTS utterances
-          speakAnswers: false,          // read answers out loud
-          allowedDomains: DEFAULT_RESEARCH_DOMAINS.slice()
+          isListening: false
         };
       }
 
-      // Settings is gated behind this password (asked once per page load).
-      // Note: this is a soft lock against casual clicks, not real security —
-      // anyone reading the page source can see it.
-      const SETTINGS_PASSWORD = 'recast2026';
-
       const STATE = {
         activeTab: 'home',
-        expandedSlot: null,
         editingSlot: 0,
         historyOpen: false,
         historyConfirmDeleteId: null,
         historyQuery: '',
-        // This visit's archived conversations, newest first. MEMORY ONLY by
-        // design: any refresh or tab close wipes it, so visitors never see
-        // each other's chats. (Q&As still log silently to the sheet.)
+        // This visit's archived conversations, newest first (memory only —
+        // kept for the sidebar's structure).
         sessionHistory: [],
-        composerExpanded: false,
-        cardMenuOpen: false,
-        // The "How should Randy listen?" chooser shown when turning Randy on.
+        // The audio-mode chooser shown when turning listening on.
         audioChooserOpen: false,
-        settingsUnlocked: false,
         // While the Settings sheet is open we pause listening (see
         // pauseListenForSettings); this remembers the capture mode to resume
         // in when Settings closes. false = nothing to resume.
         settingsResumeListen: false,
+        // Checklist UI state. Drafts live here so background re-renders
+        // (toasts, live status) never wipe what the seller is typing.
+        editingItemId: null,   // item currently in inline text-edit mode
+        editItemText: '',      // draft in the inline editor
+        newItemText: '',       // draft in the "add an item" box
         slots: [makeSlot()]
       };
 
       let HISTORY_VIEW = { open: null };
-
-      // Floating pop-out chat (Chrome's Document Picture-in-Picture).
-      // The pop-out gets its own compact DOM built from STATE — nothing is
-      // ever moved out of #app, since render() rebuilds #app's innerHTML
-      // constantly and would orphan any adopted nodes.
-      const PIP = {
-        supported: 'documentPictureInPicture' in window,
-        window: null,     // the open PiP window, or null
-        slotIdx: null,    // slot the pop-out is pinned to
-        opening: false,   // requestWindow() in flight — ignore re-clicks
-        lastHtml: '',     // last message-list HTML, to skip no-op rebuilds
-        collapsed: false, // minimized to the floating blue "R" icon
-        swapping: false,  // mid window-swap — ignore the doomed pagehide
-        restoreSize: null,// window size to bring back on expand
-        unseen: 0,        // answers that landed while collapsed (badge count)
-        flashNext: false, // auto-expanded mid-answer — flash the reply when it lands
-        flashNow: false   // flash the newest answer on the next message rebuild
-      };
 
       const VOICE = {
         srSupported: !!(window.SpeechRecognition || window.webkitSpeechRecognition),
@@ -526,13 +490,12 @@
         permissionDenied: false,
         toastTimeoutId: null,
         toastMessage: '',
-        playingMsg: null,         // {slot, msg} of the message currently being spoken
         interimText: '',          // live partial transcript
         interimSlot: null,
         interimAt: 0,             // when the interim transcript last changed
-        lastTtsEndAt: 0,          // for the post-playback echo grace window
-        ttsPaused: false,         // legacy guard flag; always false now (no TTS pause)
-        recentTtsText: '',        // rolling buffer of spoken text for echo matching
+        lastTtsEndAt: 0,          // for the post-playback echo grace window (inert — nothing speaks)
+        ttsPaused: false,         // legacy guard flag; always false (no TTS in this tool)
+        recentTtsText: '',        // rolling buffer for echo matching (inert — nothing speaks)
         srRunning: false,         // recognizer actually running (onstart..onend)
         srStartStrikes: 0,        // consecutive watchdog ticks that found the
                                   // recognizer stopped despite trying to start —
@@ -542,16 +505,9 @@
         micStream: null,          // held open (echo cancellation OFF) so the
                                   // mic hears the computer's speakers — see
                                   // startListening()
-        // Push-to-talk dictation in the pop-out composer. A SEPARATE
-        // recognizer from the passive one above: the Web Speech API only
-        // runs one recognizer at a time, so while dictation is live the
-        // passive recognizer is paused (dictationPaused) and resumed when
-        // dictation ends — see startDictation()/stopDictation().
-        dictation: null,          // dedicated dictation SpeechRecognition
-        dictating: false,         // dictation actively capturing the mic
-        dictationPaused: false,   // passive recognizer paused for dictation
-        dictationBase: '',        // finalized dictation text staged in the input
-        dictationTarget: null     // where dictation writes: {kind:'pip'} or {kind:'home', slot}
+        // Legacy guard flag read by the recognizer's restart paths; always
+        // false now that push-to-talk dictation is gone.
+        dictationPaused: false
       };
 
       // Best-effort operating-system detection so the audio-setup guidance can
@@ -577,7 +533,7 @@
       // Where the user changes their default microphone, per OS. Chrome's live
       // speech recognizer always captures the OS default input (it can't be
       // pointed at a specific device from JavaScript), so this is the setting
-      // that actually decides what Randy hears.
+      // that actually decides what gets heard.
       function osDefaultMicPath() {
         if (PLATFORM === 'mac') return 'System Settings → Sound → Input';
         if (PLATFORM === 'win') return 'Settings → System → Sound → Input';
@@ -591,7 +547,7 @@
         return 'tick “Share tab/system audio”';
       }
 
-      // Which microphone Randy opens. '' = the system default device
+      // Which microphone gets opened. '' = the system default device
       // (recommended — and the device Chrome's live speech recognizer always
       // uses); a specific deviceId pins the capture to that input so the user
       // can switch hardware in Settings if the default device misbehaves. The
@@ -600,16 +556,6 @@
       const MIC = {
         deviceId: '',             // '' = system default, else a specific deviceId
         devices: []               // cached [{deviceId, label}] of audioinput devices
-      };
-
-      // The speaking voice the user picked in Settings, by its
-      // SpeechSynthesisVoice.name. '' = automatic (Randy scores the installed
-      // voices and picks the most natural — the original behaviour). A chosen
-      // voice is honoured only while it's still installed; if it disappears
-      // (voice packs change between sessions) Randy silently falls back to the
-      // automatic pick so speech never breaks.
-      const TTS = {
-        chosenName: ''
       };
 
       // One-tap microphone check in Settings. Opens a SHORT-LIVED capture on
@@ -799,35 +745,32 @@
         if (wasActive && STATE.activeTab === 'settings') render();
       }
 
-      // Listening runtime state. Randy hears on two channels: (1) the
+      // Listening runtime state. The assistant hears on two channels: (1) the
       // microphone via the Web Speech recognizer — which also overhears the
       // call on the speakers, but only with echo cancellation / noise
       // suppression / auto-gain disabled (see startListening), and only when
       // the user isn't on headphones; and (2) the computer's audio captured
       // digitally through the share picker and transcribed locally by an
       // in-browser Whisper model (see DESKTOP / startDesktopCapture), which
-      // works on headphones too. Both channels feed the same pipeline below.
+      // works on headphones too. Both channels feed the same coverage pipeline.
       const TECH = {
         lastErrorToastAt: 0,      // throttle pipeline-failure toasts
         buffer: '',               // join buffer for ASR fragments
         bufferTimerId: null,
         deferrals: 0,
-        pending: false,           // classifier call in flight
-        pendingSince: 0,          // when the classifier gate started (wedge detection)
-        answerSince: 0,           // when the current overheard answer started (wedge detection)
+        pending: false,           // coverage-classifier call in flight
+        pendingSince: 0,          // when the check started (wedge detection)
         classifyController: null, // aborts a wedged classifier round-trip
         classifyGen: 0,           // epoch — a stale classify resolution is ignored
         watchdogId: null,         // self-healing pipeline watchdog interval
-        activeText: '',           // utterance currently being analyzed/answered (for the live band)
-        questionQueue: [],        // FIFO of questions overheard while Randy was busy
-        context: [],              // recent utterances for the classifier
+        activeText: '',           // utterance currently being checked (for the live band)
+        questionQueue: [],        // FIFO of utterances heard while the classifier was busy
+        context: [],              // recent utterances — the conversation window
         lastSubmitted: '',
         lastSubmittedAt: 0,
         decisions: [],            // ring buffer {text, accepted, confidence, topic, ts}
-        recentPairs: [],          // last assist Q&As — API context that survives chat archiving
-        heard: 0,
-        answered: 0,
-        perf: null                // active latency timeline for the question being answered (instrumentation)
+        heard: 0,                 // utterances run through the coverage check
+        answered: 0               // items auto-checked this listening session
       };
 
       function listeningOn() { return STATE.slots[0].listenOn; }
@@ -842,7 +785,7 @@
       // fallback) — no audio ever leaves the machine, no API key, and it
       // works identically on speakers or headphones. Its transcripts feed the
       // exact same answer pipeline the microphone uses (handleVoiceTranscript
-      // / updateInterim). Optional: if the user dismisses the picker, Randy
+      // / updateInterim). Optional: if the user dismisses the picker, listening
       // falls back to mic-only just like before.
       const DESKTOP = {
         supported: !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia &&
@@ -908,31 +851,11 @@
       function saveSettings() {
         const data = STATE.slots.map(s => ({
           label: s.label,
-          prompt: s.prompt,
-          voiceName: s.voiceName,
-          voicePersonality: s.voicePersonality,
-          speakAnswers: !!s.speakAnswers,
           audioMode: s.audioMode === 'one-way' ? 'one-way' : 'two-way',
-          micDeviceId: MIC.deviceId || '',
-          ttsVoiceName: TTS.chosenName || '',
-          allowedDomains: s.allowedDomains
+          micDeviceId: MIC.deviceId || ''
         }));
         try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(data)); } catch {}
       }
-
-      // Marker strings unique to previous default prompts. If the stored prompt
-      // contains any of these we treat it as an unmodified prior default and
-      // refresh to RANDY_PERSONA, so persona updates reach returning users
-      // without clobbering anyone who actually customized their prompt.
-      const LEGACY_PROMPT_MARKERS = [
-        "Recast Software's Application Workspace expert",
-        'ABSOLUTE RULE — NO EXCEPTIONS',
-        // Distinctive line from the persona default that shipped before the
-        // "Honesty About Capabilities" section was added. Returning users have
-        // that older default cached; matching it here refreshes them to the
-        // current RANDY_PERSONA so the honesty rules actually reach them.
-        'Your research process is invisible.'
-      ];
 
       function loadSettings() {
         try {
@@ -942,34 +865,15 @@
           data.forEach((d, i) => {
             const s = STATE.slots[i];
             if (!s) return;
-            s.label = (d.label && d.label !== 'Recast SE') ? d.label : s.label;
-            const storedPrompt = d.prompt || '';
-            const isLegacyDefault = storedPrompt && LEGACY_PROMPT_MARKERS.some(m => storedPrompt.includes(m));
-            s.prompt = (isLegacyDefault ? '' : storedPrompt) || s.prompt;
-            s.voiceName = d.voiceName || s.label;
-            s.voicePersonality = d.voicePersonality || DEFAULT_VOICE_PERSONALITY;
-            // speakAnswers (migrating the older speakResponses key)
-            s.speakAnswers = !!(d.speakAnswers !== undefined ? d.speakAnswers : d.speakResponses);
+            if (d.label && typeof d.label === 'string') s.label = d.label;
             if (d.audioMode === 'one-way' || d.audioMode === 'two-way') s.audioMode = d.audioMode;
-            if (Array.isArray(d.allowedDomains)) {
-              s.allowedDomains = d.allowedDomains.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim());
-            }
           });
           // The chosen microphone is global, not per-slot — read it off the
           // first record. Validated against the live device list once labels
           // load (refreshMicDevices), so a stale id can't strand listening.
           if (data[0] && typeof data[0].micDeviceId === 'string') MIC.deviceId = data[0].micDeviceId;
-          // The chosen speaking voice is also global (one voice for Randy),
-          // read off the first record. Validated against the live voice list at
-          // speak time (resolveVoice), so a voice that's since been uninstalled
-          // just falls back to the automatic pick.
-          if (data[0] && typeof data[0].ttsVoiceName === 'string') TTS.chosenName = data[0].ttsVoiceName;
         } catch {}
         // Listening always starts OFF — the screen-share picker needs a click.
-        // The proxy URL used to be overridable per-browser, which left some
-        // machines pointing at dead deployments. Drop any saved override so
-        // every computer uses the hardcoded GSHEET_WEBHOOK.
-        try { localStorage.removeItem('recast_gsheet_url'); } catch {}
       }
 
       /* ================================================================
@@ -985,28 +889,6 @@
       // One-time cleanup: older builds cached synced history on disk under
       // HISTORY_KEY. Clear it so returning devices don't keep stale chats.
       try { localStorage.removeItem(HISTORY_KEY); } catch {}
-
-      // Assist answers must open with "**Short answer:**". Models occasionally
-      // ad-lib a fake-out first ("Great question! ... Just kidding. Here's
-      // the real answer:"). Two passes, both anchored so they can't damage
-      // a genuine answer: peel known opener patterns off the start, then if
-      // the bolded Short-answer marker still sits past the start, cut to it.
-      function sanitizeAssistAnswer(text) {
-        let t = String(text || '').trim();
-        let prev;
-        do {
-          prev = t;
-          t = t
-            .replace(/^\**(?:great|good|excellent|awesome|fantastic) question\b[.!…:]*\**\s*/i, '')
-            .replace(/^let me (?:explain|walk you through|break (?:this|that|it) down)\b[^\n.!?]*[.!?…]*\s*/i, '')
-            .replace(/^just kidding\b[.!,…]*\s*/i, '')
-            .replace(/^(?:here'?s|now for) the (?:real|actual|serious) answer[.!:]*\s*/i, '')
-            .trim();
-        } while (t !== prev);
-        const m = t.match(/\*\*\s*short\s+answer\s*:?\s*\*\*/i);
-        if (m && m.index > 0 && m.index < 200) t = t.slice(m.index).trim();
-        return t || String(text || '').trim();
-      }
 
       function entryMs(entry) {
         let ts = Number(entry && entry.timestamp) || 0;
@@ -1092,60 +974,7 @@
         if (STATE.sessionHistory.length > 50) STATE.sessionHistory.length = 50;
       }
 
-      function collectPairs(slot) {
-        const pairs = [];
-        for (let i = 0; i < slot.messages.length - 1; i++) {
-          const m = slot.messages[i];
-          const next = slot.messages[i + 1];
-          if (m.role === 'user' && next && next.role === 'assistant' && next.content) {
-            pairs.push({ question: String(m.content || ''), answer: String(next.content || '') });
-          }
-        }
-        return pairs;
-      }
-
-      // Tuck the current conversation into this visit's History panel and
-      // reset the chat to empty. The sheet already has every answered Q&A
-      // (the client saves each one in the background), so nothing is lost.
-      // Rotating the session id keeps the sheet's grouping in step with the
-      // local entry. Returns true when something was actually archived.
-      function archiveChatToHistory(slot) {
-        const pairs = collectPairs(slot);
-        if (!pairs.length) return false;
-        const ts = Date.now();
-        addSessionHistoryEntry({
-          id: SESSION_ID + '-' + ts,
-          session_id: SESSION_ID,
-          date: new Date(ts).toLocaleDateString('en-US'),
-          timestamp: ts,
-          pairs,
-          preview: pairs[0].question.substring(0, 120)
-        });
-        slot.messages = [];
-        SESSION_ID = genSessionId();
-        return true;
-      }
-
-      // "New chat": archive and start fresh.
-      function newChat() {
-        const slot = STATE.slots[0];
-        if (slot.abortController) { try { slot.abortController.abort(); } catch {} slot.abortController = null; }
-        teardownTtsQueue(0);
-        if (slot.isSpeaking) stopSpeaking();
-        abortActiveReply();   // cancel any in-flight reply and stop any audio
-        slot.loading = false;
-        const archived = archiveChatToHistory(slot);
-        if (!archived) {
-          slot.messages = [];
-          SESSION_ID = genSessionId();
-        }
-        slot.inputText = '';
-        showToast(archived ? 'New chat — the old one is saved in History' : 'New chat');
-        render();
-      }
-
-      // Local-only: removes the entry from this visit's panel. The sheet log
-      // is an untouched audit record — no delete request is ever sent.
+      // Local-only: removes the entry from this visit's panel.
       function deleteHistoryEntry(id) {
         STATE.sessionHistory = STATE.sessionHistory.filter(h => h.id !== id);
       }
@@ -1172,7 +1001,7 @@
         }
       }
 
-      // Keep the Apps Script proxy warm while Randy is listening. Apps Script
+      // Keep the Apps Script proxy warm while listening is on. Apps Script
       // spins its instance down after a few idle minutes; the next request then
       // pays a 0.5–2 s cold start — and on a live call that tax lands on the
       // FIRST overheard question, exactly when it's most noticeable. A cheap
@@ -1192,66 +1021,6 @@
       }
       function stopProxyWarmup() {
         if (proxyWarmId) { clearInterval(proxyWarmId); proxyWarmId = null; }
-      }
-
-      /* ================================================================
-       * LATENCY INSTRUMENTATION (overheard question → spoken answer)
-       *
-       * "You can't shave milliseconds you can't see." Each finalized question
-       * gets a timeline; stage durations and the answer call's prompt-cache
-       * usage are logged to the console and kept in a small ring buffer at
-       * window.__randyPerf for ad-hoc inspection. This is pure measurement — it
-       * never changes behaviour, the answer, or the pipeline's control flow.
-       *
-       * Cache health: the ~2K-token persona/style prefix is wrapped for
-       * Anthropic prompt caching (systemBlocks). On a warm call the answer's
-       * usage should show cache_read_input_tokens ≫ cache_creation_input_tokens;
-       * if reads stay 0 across calls, the cache isn't hitting and the persona is
-       * being reprocessed every time (wasted input-processing latency).
-       * ================================================================ */
-      const PERF = { enabled: true, log: [], KEEP: 20 };
-      function perfStart(question) {
-        if (!PERF.enabled) return null;
-        return { question: truncate(question, 80), t0: performance.now(), marks: {}, cache: {} };
-      }
-      function perfMark(t, name) {
-        if (t && t.marks[name] == null) t.marks[name] = performance.now();
-      }
-      function perfCache(t, usage, label) {
-        if (!t || !usage) return;
-        t.cache[label] = {
-          read: usage.cache_read_input_tokens || 0,
-          created: usage.cache_creation_input_tokens || 0,
-          input: usage.input_tokens || 0
-        };
-      }
-      function perfFinish(t, status) {
-        if (!t || t._done) return;
-        t._done = true;
-        const m = t.marks;
-        const seg = (a, b) => (m[a] != null && m[b] != null) ? Math.round(m[b] - m[a]) : null;
-        const endRef = m.firstAudio != null ? m.firstAudio : (m.answerEnd != null ? m.answerEnd : performance.now());
-        const ans = t.cache && t.cache.answer;
-        const summary = {
-          status: status || 'done',
-          total_ms: Math.round(endRef - t.t0),
-          classify_ms: seg('classifyStart', 'classifyEnd'),
-          answer_ms: seg('answerStart', 'answerEnd'),
-          to_first_audio_ms: m.firstAudio != null ? Math.round(m.firstAudio - t.t0) : null,
-          cache_hit: ans ? (ans.read > 0) : null,
-          cache: t.cache,
-          question: t.question
-        };
-        PERF.log.push(summary);
-        while (PERF.log.length > PERF.KEEP) PERF.log.shift();
-        try { window.__randyPerf = PERF.log; } catch {}
-        const parts = ['[perf] ' + summary.status, 'total=' + summary.total_ms + 'ms'];
-        if (summary.classify_ms != null) parts.push('classify=' + summary.classify_ms + 'ms');
-        if (summary.answer_ms != null) parts.push('answer=' + summary.answer_ms + 'ms');
-        if (summary.to_first_audio_ms != null) parts.push('→firstAudio=' + summary.to_first_audio_ms + 'ms');
-        if (ans) parts.push('cache:read=' + ans.read + '/created=' + ans.created);
-        console.info(parts.join(' ') + ' — "' + summary.question + '"');
-        if (TECH.perf === t) TECH.perf = null;
       }
 
       loadSettings();
@@ -1308,45 +1077,10 @@
         return out.join('');
       }
 
-      // Split an assist reply into the visible answer and the spoken summary.
-      function splitSpoken(reply) {
-        const parts = String(reply || '').split(/\n?=+\s*SPOKEN\s*=+\s*\n?/i);
-        const main = (parts[0] || '').trim();
-        let spoken = (parts[1] || '').trim();
-        if (!spoken) spoken = extractSummary(stripMarkdown(main));
-        return { main, spoken };
-      }
-
-      function stripMarkdown(text) {
-        return String(text)
-          .replace(/```[\s\S]*?```/g, ' ')
-          .replace(/`([^`]+)`/g, '$1')
-          .replace(/\*\*([^*]+)\*\*/g, '$1')
-          .replace(/__([^_]+)__/g, '$1')
-          .replace(/(^|\s)\*([^*\n]+)\*/g, '$1$2')
-          .replace(/(^|\s)_([^_\n]+)_/g, '$1$2')
-          .replace(/^#{1,6}\s+/gm, '')
-          .replace(/^\s*[-*+•]\s+/gm, '')
-          .replace(/^\s*\d+[.)]\s+/gm, '')
-          .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-          .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-          .replace(/^\s*>\s?/gm, '')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
-      }
-
-      // First ~2 sentences (max 300 chars) of a plain-text blob, for TTS.
-      function extractSummary(text) {
-        const clean = String(text).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-        const m = clean.match(/^.*?[.!?](?:\s+.*?[.!?])?/);
-        const s = m ? m[0] : clean;
-        return s.substring(0, 300);
-      }
-
       // Copy text to the clipboard with a toast + brief "copied" state on btn.
       function copyTextToClipboard(text, btn) {
         const done = () => {
-          showToast('Answer copied');
+          showToast('Copied');
           if (btn) {
             btn.classList.add('copied');
             setTimeout(() => btn.classList.remove('copied'), 1200);
@@ -1366,81 +1100,6 @@
         }
       }
 
-      // Silently copy a finished answer to the clipboard the moment it's
-      // shown, so the user can paste it straight into an email without ever
-      // clicking the copy button. Unlike copyTextToClipboard this stays quiet
-      // — no toast, no button highlight — because it fires automatically on
-      // every answer (including overheard ones mid-call) and shouldn't nag.
-      // The manual copy button still gives explicit feedback when used.
-      function autoCopyAnswer(text) {
-        const t = String(text || '').trim();
-        if (!t) return;
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(t).catch(() => {
-            // Clipboard may reject without focus/permission; the copy button
-            // remains available as the explicit fallback. Stay silent.
-          });
-          return;
-        }
-        try {
-          const ta = document.createElement('textarea');
-          ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
-          document.body.appendChild(ta); ta.select();
-          document.execCommand('copy'); document.body.removeChild(ta);
-        } catch { /* best-effort; manual copy button still works */ }
-      }
-
-      function hostnameOf(url) {
-        try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
-      }
-
-      // Turn a source URL into a readable, distinguishing chip label derived
-      // purely from the URL string (no network). Falls back to hostnameOf on
-      // any parse failure so behavior degrades to the old site-name label.
-      function sourceLabelOf(url) {
-        let u;
-        try { u = new URL(url); } catch { return hostnameOf(url); }
-
-        const host = u.hostname.replace(/^www\./, '');
-        let category;
-        switch (host) {
-          case 'docs.recastsoftware.com': category = 'Recast Docs'; break;
-          case 'recastsoftware.com':      category = 'Recast'; break;
-          case 'docs.liquit.com':         category = 'Liquit Docs'; break;
-          case 'learn.microsoft.com':     category = 'Microsoft Learn'; break;
-          default:                        category = hostnameOf(url);
-        }
-
-        // Build a page name from the path's last meaningful segment.
-        const segs = u.pathname.split('/').filter(Boolean);
-        let seg = segs.pop() || '';
-        if (!seg || /^(index|#)/i.test(seg)) seg = segs.pop() || '';
-        seg = seg.replace(/\.(html?|aspx)$/i, '');
-
-        let pageName = '';
-        try { pageName = decodeURIComponent(seg); } catch { pageName = seg; }
-        pageName = pageName
-          .replace(/[-_]+/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .replace(/\S+/g, w => w.charAt(0).toUpperCase() + w.slice(1));
-
-        if (pageName) {
-          const label = `${category} · ${pageName}`;
-          return label.length > 80 ? label.slice(0, 80) : label;
-        }
-        return category;
-      }
-
-      // Only http(s) URLs are safe in an href. Source URLs arrive from the model/
-      // proxy (web_search results), so a stray javascript:/data: scheme could in
-      // theory become a clickable source chip that runs script in the panel.
-      // Anything that isn't plainly http(s) collapses to an inert '#'.
-      function safeHref(url) {
-        const s = String(url || '').trim();
-        return /^https?:\/\//i.test(s) ? s : '#';
-      }
-
       /* ================================================================
        * TOAST
        * ================================================================ */
@@ -1455,332 +1114,23 @@
         }, 3500);
       }
 
-      /* ================================================================
-       * "Ask about highlighted text" — arm a capture mode. Once armed, any
-       * text the user highlights on the current page (mouse-up) flows straight
-       * into the active composer and sends, exactly like typing it + Enter.
-       * A small watcher is injected into the page; it messages the panel back
-       * over chrome.runtime, and handleCapturedSelection() does the send.
-       * ================================================================ */
-      const SELECTION_CAPTURE = { armed: false, slotIdx: 0, lastText: '', tabFollow: false };
-
-      // Runs INSIDE the page (isolated world). Installs a one-time mouse-up
-      // watcher that reports the current selection to the extension, and
-      // returns whatever is selected right now so arming also catches a
-      // selection the user made before clicking the button.
-      function installRandySelectionWatcher() {
-        // Read whatever is selected right now. window.getSelection() only sees
-        // selections in the normal document — it returns "" for text selected
-        // inside a focused <input> or <textarea> (e.g. a search box), so check
-        // the active form field first and fall back to the page selection.
-        function currentSelection() {
-          let text = '';
-          try {
-            const el = document.activeElement;
-            if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') &&
-                typeof el.selectionStart === 'number' && typeof el.selectionEnd === 'number' &&
-                el.selectionEnd > el.selectionStart) {
-              text = (el.value || '').substring(el.selectionStart, el.selectionEnd);
-            }
-          } catch (e) {}
-          if (!text) {
-            try { text = window.getSelection().toString(); } catch (e) {}
-          }
-          return (text || '').trim();
-        }
-        if (!window.__randySelWatcher) {
-          window.__randySelWatcher = true;
-          let last = '';
-          const report = () => {
-            // Let the browser finalize the selection before we read it.
-            setTimeout(() => {
-              const text = currentSelection();
-              if (!text) { last = ''; return; }      // deselect → allow re-sending the same text later
-              if (text === last) return;             // ignore the duplicate selectionchange/mouseup pair
-              last = text;
-              try { chrome.runtime.sendMessage({ type: 'randy-selection', text }); } catch (e) {}
-            }, 0);
-          };
-          // Fire at the end of a highlight gesture (drag, double-click word,
-          // triple-click). One send per finished selection, de-duped above.
-          document.addEventListener('mouseup', report, true);
-        }
-        return currentSelection();
-      }
-
-      async function injectSelectionListener(tabId) {
-        try {
-          const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: installRandySelectionWatcher,
-          });
-          return ((results && results[0] && results[0].result) || '').trim();
-        } catch (err) {
-          // chrome://, the Web Store, the Extensions page, etc. are blocked for
-          // every extension — nothing we can read there. Signal the caller.
-          return null;
-        }
-      }
-
-      // Single shared send path for captured text — used both when arming (an
-      // already-highlighted selection) and for every later mouse-up message.
-      function handleCapturedSelection(rawText) {
-        if (!SELECTION_CAPTURE.armed) return;
-        const text = (rawText || '').trim();
-        if (!text || text === SELECTION_CAPTURE.lastText) return;
-        const slotIdx = SELECTION_CAPTURE.slotIdx;
-        const slot = STATE.slots[slotIdx];
-        if (!slot) return;
-        // If Randy is mid-answer, sendMessage() would no-op and the highlight
-        // would be lost. Don't record it as lastText so the user can re-highlight
-        // once the answer lands; just let them know.
-        if (slot.loading) { showToast('Randy is still answering — highlight again in a moment.'); return; }
-        SELECTION_CAPTURE.lastText = text;
-        // Drop it into the active composer and fire the normal send path, so the
-        // behaviour is identical to typing the text and pressing Enter.
-        slot.inputText = text;
-        const live = document.getElementById('home-input-' + slotIdx);
-        if (live) live.value = text;
-        sendMessage(slotIdx);
-      }
-
-      // Keep capturing when the user switches tabs or navigates — re-inject the
-      // watcher into whatever tab is now active. The in-page guard makes
-      // re-injection a no-op on tabs that already have it.
-      function onCaptureTabActivated(info) {
-        if (SELECTION_CAPTURE.armed && info && info.tabId != null) injectSelectionListener(info.tabId);
-      }
-      function onCaptureTabUpdated(tabId, changeInfo, tab) {
-        if (SELECTION_CAPTURE.armed && changeInfo.status === 'complete' && tab && tab.active) {
-          injectSelectionListener(tabId);
-        }
-      }
-      function armTabFollow() {
-        if (SELECTION_CAPTURE.tabFollow) return;
-        SELECTION_CAPTURE.tabFollow = true;
-        try {
-          chrome.tabs.onActivated.addListener(onCaptureTabActivated);
-          chrome.tabs.onUpdated.addListener(onCaptureTabUpdated);
-        } catch (e) {}
-      }
-
-      function disarmSelectionCapture() {
-        SELECTION_CAPTURE.armed = false;
-        SELECTION_CAPTURE.lastText = '';
-        // The tab-follow listeners stay registered but no-op while disarmed, and
-        // any in-page watchers go quiet because handleCapturedSelection() gates
-        // on `armed`. Nothing to tear down.
-      }
-
-      async function toggleSelectionCapture(idx) {
-        const slotIdx = idx !== null && idx !== undefined ? idx : 0;
-        if (SELECTION_CAPTURE.armed) {
-          disarmSelectionCapture();
-          showToast('Highlight capture off.');
-          render();
-          return;
-        }
-        try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (!tab || tab.id == null) { showToast("Can't read this page."); return; }
-
-          // Arm before injecting so a pre-existing selection (returned by the
-          // inject call) is accepted by handleCapturedSelection().
-          SELECTION_CAPTURE.armed = true;
-          SELECTION_CAPTURE.slotIdx = slotIdx;
-          SELECTION_CAPTURE.lastText = '';
-
-          const current = await injectSelectionListener(tab.id);
-          if (current === null) {            // page we can never read
-            disarmSelectionCapture();
-            showToast("Can't read this page.");
-            render();
-            return;
-          }
-          armTabFollow();
-          if (current) {
-            handleCapturedSelection(current); // already had text highlighted → send it now
-          } else {
-            showToast('Highlight text on the page — it goes straight to Randy.');
-          }
-          render();
-        } catch (err) {
-          disarmSelectionCapture();
-          showToast("Can't read this page.");
-          render();
-        }
-      }
-
-      // Auto-arm highlight capture at launch, so highlighting any text on the
-      // page goes straight to Randy without first clicking the button — the
-      // user can still toggle it off with the button. Silent + resilient: an
-      // unreadable active tab (chrome://, Web Store, etc.) just leaves it armed,
-      // and the tab-follow listeners inject the watcher the moment the user
-      // lands on a readable page.
-      async function autoArmSelectionCapture() {
-        if (SELECTION_CAPTURE.armed) return;
-        SELECTION_CAPTURE.armed = true;
-        SELECTION_CAPTURE.slotIdx = 0;
-        SELECTION_CAPTURE.lastText = '';
-        armTabFollow();
-        try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tab && tab.id != null) {
-            // Install the in-page watcher only — unlike the button, don't send
-            // whatever was already highlighted before launch (that would fire a
-            // surprising message on open). Only fresh mouse-up highlights count.
-            // An unreadable page returns null; stay armed and let tab-follow
-            // inject on the next readable page. No toast at launch.
-            await injectSelectionListener(tab.id);
-          }
-        } catch (e) {}
-        render();
-      }
-
-      // Receive selections reported by the in-page watcher. Registered once.
-      if (!globalThis.__randySelMsgWired) {
-        globalThis.__randySelMsgWired = true;
-        try {
-          chrome.runtime.onMessage.addListener((msg) => {
-            if (msg && msg.type === 'randy-selection') handleCapturedSelection(msg.text);
-          });
-        } catch (e) {}
-      }
 
       /* ================================================================
-       * TTS — streaming sentence queue + echo protection
+       * TTS ECHO GUARDS — retained from the original listening pipeline
        * ================================================================ */
 
-      const TTS_STATE = { speakingSlot: null };
 
-      // Rank voices by how human they sound. Modern neural voices ("Natural",
-      // "Online", Google's hosted voices) beat the legacy desktop synths by a
-      // mile, so quality outranks gender — a natural-sounding voice that isn't
-      // deep still sounds far less robotic than a deep legacy one.
-      function scoreVoice(v) {
-        let s = 0;
-        if (/\b(natural|neural)\b/i.test(v.name)) s += 16;
-        if (/\b(premium|enhanced|plus)\b/i.test(v.name)) s += 10;
-        if (/\bonline\b/i.test(v.name)) s += 6;
-        if (/google/i.test(v.name)) s += 6;
-        if (/\b(andrew|brian|christopher|guy|davis|roger|steffan|ryan|aaron|david|daniel|alex|tom|mark|eric|fred|george|james)\b/i.test(v.name)) s += 3;
-        if (/male/i.test(v.name) && !/female/i.test(v.name)) s += 3;
-        if (/female|\b(zira|susan|hazel|samantha|victoria|karen|moira|tessa|fiona|jenny|aria|michelle|sonia|libby|emma|ava|clara|ana)\b/i.test(v.name)) s -= 4;
-        if (/^en[-_]us/i.test(v.lang)) s += 2;
-        if (/desktop/i.test(v.name)) s -= 2;
-        return s;
-      }
-
-      function pickDeepVoice() {
-        if (!VOICE.ttsSupported) return null;
-        const voices = window.speechSynthesis.getVoices() || [];
-        if (voices.length === 0) return null;
-        const enVoices = voices.filter(v => /^en(-|_|$)/i.test(v.lang));
-        const pool = enVoices.length ? enVoices : voices;
-        return pool.slice().sort((a, b) => scoreVoice(b) - scoreVoice(a))[0];
-      }
-
-      // The voice Randy actually speaks with. Honours the user's explicit
-      // choice from Settings when that voice is still installed; otherwise
-      // (no choice, or the chosen voice is gone) falls back to the automatic
-      // pick. This is the single resolver every speak path calls, so the
-      // choice and the auto-pick can never drift apart.
-      function resolveVoice() {
-        if (!VOICE.ttsSupported) return null;
-        if (TTS.chosenName) {
-          const voices = window.speechSynthesis.getVoices() || [];
-          const match = voices.find(v => v.name === TTS.chosenName);
-          if (match) return match;
-        }
-        return pickDeepVoice();
-      }
-
-      // Pronunciation lexicon — a substitution dictionary applied before text
-      // reaches the speech engine. Three kinds of entries:
-      //   - expansions the field actually says ("ConfigMgr" → "Config Manager",
-      //     "Win32" → "win thirty-two", "v6.2" → "version 6 point 2")
-      //   - letter-by-letter acronyms, spaced out so the engine spells them
-      //   - phonetic respellings for names engines mangle ("Liquit" → "Lickit")
-      // Order matters: specific forms before their prefixes (MSIX before MSI,
-      // "TCP 443" before bare TCP). All-caps acronyms are deliberately
-      // case-SENSITIVE so "IT pros" becomes "I T pros" but "it" never does.
-      // "Azure" is left alone on purpose: engines already say the real word
-      // correctly ("AZH-er"), and a respelling would gamble on worse.
-      const TTS_LEXICON = [
-        // Expansions and spoken phrasings
-        [/\bConfigMgr\b/gi, 'Config Manager'],          // never read literally
-        [/\b(?:W365|Windows\s*365)\b/gi, 'Windows three sixty-five'],
-        [/\bWin32\b/gi, 'win thirty-two'],              // never "win three two"
-        [/\bmacOS\b/gi, 'mack oh ess'],                 // never "may-coss"
-        [/\bv(\d+(?:\.\d+)+)\b/g, (m, ver) => 'version ' + ver.split('.').join(' point ')],
-        [/\bSOC\s*2\b/g, 'sock two'],
-        [/\bISO\s*27001\b/gi, 'eye-so twenty-seven thousand one'],
-        [/\bEntra\s+ID\b/gi, 'Entra eye-dee'],
-        [/\bco-management\b/gi, 'co management'],       // pause at the hyphen, not "comanagement"
-        [/\bring-based\b/gi, 'ring based'],
-        [/\bTCP\s+443\b/g, 'T C P four forty-three'],   // IT pros say "four forty-three"
-        // Letter-by-letter acronyms
-        [/\bSCCM\b/g, 'S C C M'],                       // engines say "seck-em"
-        [/\bMECM\b/g, 'M E C M'],
-        [/\bMSIX\b/g, 'M S I X'],
-        [/\bMSI\b/g, 'M S I'],
-        [/\bAVD\b/g, 'A V D'],
-        [/\bVDI\b/g, 'V D I'],
-        [/\bRDS\b/g, 'R D S'],
-        [/\bSSO\b/g, 'S S O'],
-        [/\bMFA\b/g, 'M F A'],
-        [/\bAPIs\b/g, "A P I's"],
-        [/\bAPI\b/g, 'A P I'],
-        [/\bTCP\b/g, 'T C P'],
-        [/\bOS\b/g, 'O S'],
-        [/\bIT\b/g, 'I T'],
-        // Hybrids and words engines tend to mangle
-        [/\bRBAC\b/g, 'R-back'],
-        [/\bLDAP\b/g, 'L-dap'],
-        [/\bCSAT\b/g, 'see-sat'],
-        [/\bIntune\b/gi, 'Intoon'],                     // two syllables, never "in-tune-ee"
-        [/\bLiquit\b/gi, 'Lickit'],
-        [/\bOmnissa\b/gi, 'om-nissa'],
-        [/\bNerdio\b/gi, 'nerd-ee-oh'],
-        [/\bOkta\b/gi, 'Octa'],
-        [/\bCitrix\b/gi, 'sit-ricks'],
-        [/\bWinget\b/gi, 'win-get'],
-        [/\bJumpCloud\b/gi, 'jump cloud'],
-        [/\bChocolatey\b/gi, 'chocolate-ee'],
-        [/\bKubernetes\b/gi, 'koo-ber-net-eez']
-      ];
-
-      // Rewrites text the way a person would actually say it, so the speech
-      // engine doesn't trip over notation it reads literally or mispronounces.
-      function prepareForSpeech(text) {
-        let t = String(text || '')
-          .replace(/https?:\/\/([^\s\/]+)\S*/gi, '$1'); // out loud, a URL is just its hostname
-        for (const [re, sub] of TTS_LEXICON) t = t.replace(re, sub);
-        return t
-          .replace(/\be\.g\.,?\s*/gi, 'for example, ')
-          .replace(/\bi\.e\.,?\s*/gi, 'that is, ')
-          .replace(/\betc\.(\s|$)/gi, 'and so on$1')
-          .replace(/\bvs\.?(\s|$)/gi, 'versus$1')
-          .replace(/(\w)\s*\/\s*(\w)/g, '$1 or $2')     // "Intune/ConfigMgr"
-          .replace(/\s*&\s*/g, ' and ')
-          .replace(/\s+[—–]\s+/g, ', ')                 // dashes don't pause; commas do
-          .replace(/\s*\(\s*/g, ', ')
-          .replace(/\s*\)\s*([.,;:!?])?/g, (m, p) => (p || ',') + ' ')
-          .replace(/\s{2,}/g, ' ')
-          .trim();
-      }
-
-      // True while Randy is speaking OR within the tail window after speech
+      // True while audio is being spoken OR within the tail window after speech
       // ends — the speaker keeps producing audio briefly after onend fires.
       const TTS_ECHO_GRACE_MS = 1200;
-      // Echo text-matching only applies while Randy's audio is playing or
+      // Echo text-matching only applies while the tool's audio is playing or
       // shortly after it stops (speaker → mic → ASR adds a few seconds of
       // lag). Beyond that, overlap with shared vocabulary — product names
       // come up in every question — must not swallow genuine speech.
       const TTS_ECHO_TEXT_WINDOW_MS = 8000;
-      // The fuzzy word-overlap echo test only runs while Randy's audio is
+      // The fuzzy word-overlap echo test only runs while the tool's audio is
       // playing or just stopped. On a technical call the NEXT question
-      // naturally reuses the vocabulary of the answer Randy just gave, so a
+      // naturally reuses the vocabulary that was just spoken, so a
       // long fuzzy window makes him deaf to follow-ups — exactly the
       // "doesn't hear the question" failure. Exact-substring matches keep
       // the full TTS_ECHO_TEXT_WINDOW_MS (real echo lags a few seconds).
@@ -1805,7 +1155,7 @@
         VOICE.recentTtsText = (VOICE.recentTtsText + ' ' + n).slice(-2000);
       }
 
-      // True if `text` looks like an echo of something Randy just spoke.
+      // True if `text` looks like an echo of something the tool just spoke.
       function isLikelyEcho(text) {
         const n = normalizeForEcho(text);
         if (!n || n.length < 4) return false;
@@ -1823,168 +1173,10 @@
         return (matches / words.length) >= 0.7;
       }
 
-      // The recognizer now stays live during TTS — there's no conversation-mode
-      // pause anymore. Randy keeps hearing the call while he reads an answer
-      // aloud; mic echo cancellation plus the isLikelyEcho() text guard keep
-      // his own voice from being picked up as a new question. markTtsEnded()
-      // is called wherever speech stops so the echo grace window still works.
-
-      function initTtsQueue(idx, signal, msgIdx) {
-        const slot = STATE.slots[idx];
-        teardownTtsQueue(idx);
-        slot.ttsQueue = {
-          sentences: [],
-          processing: false,
-          signal,
-          msgIdx,
-          done: false,
-          currentUtter: null
-        };
-      }
-
-      function teardownTtsQueue(idx) {
-        const slot = STATE.slots[idx];
-        const q = slot && slot.ttsQueue;
-        if (!q) return;
-        const wasActive = q.processing || q.sentences.length > 0 || !!q.currentUtter;
-        try {
-          if (q.currentUtter && VOICE.ttsSupported) {
-            window.speechSynthesis.cancel();
-          }
-        } catch {}
-        slot.ttsQueue = null;
-        if (TTS_STATE.speakingSlot === idx) TTS_STATE.speakingSlot = null;
-        slot.isSpeaking = false;
-        VOICE.playingMsg = null;
-        if (wasActive) markTtsEnded();
-      }
-
-      function enqueueTtsSentence(idx, text) {
-        const slot = STATE.slots[idx];
-        const q = slot && slot.ttsQueue;
-        if (!q) return;
-        if (q.signal && q.signal.aborted) return;
-        q.sentences.push(text);
-        processTtsQueue(idx);
-      }
-
-      async function processTtsQueue(idx) {
-        const slot = STATE.slots[idx];
-        const q = slot && slot.ttsQueue;
-        if (!q || q.processing) return;
-        q.processing = true;
-        try {
-          while (slot.ttsQueue === q && q.sentences.length > 0 && !(q.signal && q.signal.aborted)) {
-            const text = q.sentences.shift();
-            await playTtsChunk(idx, q, text);
-          }
-        } catch (err) {
-          if (err && err.name !== 'AbortError') console.warn('TTS queue error:', err);
-        } finally {
-          q.processing = false;
-          if (slot.ttsQueue === q && q.done && q.sentences.length === 0) {
-            slot.isSpeaking = false;
-            if (TTS_STATE.speakingSlot === idx) TTS_STATE.speakingSlot = null;
-            VOICE.playingMsg = null;
-            markTtsEnded();
-            render();
-          }
-        }
-      }
-
-      function playTtsChunk(idx, q, text) {
-        const raw = stripMarkdown(text);
-        const clean = prepareForSpeech(raw);
-        if (!clean) return Promise.resolve();
-        if (!VOICE.ttsSupported) return Promise.resolve();
-        return new Promise((resolve) => {
-          if (q.signal && q.signal.aborted) return resolve();
-          const slot = STATE.slots[idx];
-          const u = new SpeechSynthesisUtterance(clean);
-          const v = resolveVoice();
-          if (v) u.voice = v;
-          // Neural voices are tuned at their defaults; bending pitch is what
-          // made the old output sound synthetic. A whisper-faster rate reads
-          // as engaged rather than narrated.
-          u.pitch = 1.0;
-          u.rate = 1.04;
-          // Echo-match against BOTH the spoken respelling (what the synth says)
-          // AND the original words. The mic/desktop tap re-transcribes the real
-          // words ("SCCM", "Intune"), not the lexicon respelling ("S C C M",
-          // "Intoon"), so storing only `clean` let acronym-heavy answers slip
-          // back in as spurious questions — feed the raw text too.
-          appendRecentTts(clean);
-          appendRecentTts(raw);
-          slot.isSpeaking = true;
-          TTS_STATE.speakingSlot = idx;
-          VOICE.playingMsg = { slot: idx, msg: q.msgIdx };
-          q.currentUtter = u;
-          render();
-          const done = () => {
-            if (q.currentUtter === u) q.currentUtter = null;
-            resolve();
-          };
-          u.onend = done;
-          u.onerror = done;
-          if (q.signal) q.signal.addEventListener('abort', () => {
-            try { window.speechSynthesis.cancel(); } catch {}
-            done();
-          }, { once: true });
-          try { window.speechSynthesis.speak(u); } catch { done(); }
-        });
-      }
-
-      function speakText(text, idx, msgIdx) {
-        if (!VOICE.ttsSupported) return;
-        const raw = stripMarkdown(text);
-        const clean = prepareForSpeech(raw);
-        if (!clean) return;
-        STATE.slots.forEach((_, i) => teardownTtsQueue(i));
-        try { window.speechSynthesis.cancel(); } catch {}
-        // Store both the respelling and the raw words — the mic re-hears the raw
-        // words, so echo-matching needs them (see playTtsChunk).
-        appendRecentTts(clean);
-        appendRecentTts(raw);
-        const u = new SpeechSynthesisUtterance(clean);
-        const v = resolveVoice();
-        if (v) u.voice = v;
-        u.pitch = 1.0;
-        u.rate = 1.04;
-        u.onstart = () => {
-          STATE.slots[idx].isSpeaking = true;
-          TTS_STATE.speakingSlot = idx;
-          if (typeof msgIdx === 'number') VOICE.playingMsg = { slot: idx, msg: msgIdx };
-          render();
-        };
-        u.onend = () => {
-          STATE.slots[idx].isSpeaking = false;
-          if (TTS_STATE.speakingSlot === idx) TTS_STATE.speakingSlot = null;
-          VOICE.playingMsg = null;
-          markTtsEnded();
-          render();
-        };
-        u.onerror = u.onend;
-        try { window.speechSynthesis.speak(u); }
-        catch {
-          STATE.slots[idx].isSpeaking = false;
-          if (TTS_STATE.speakingSlot === idx) TTS_STATE.speakingSlot = null;
-          VOICE.playingMsg = null;
-          markTtsEnded();
-          render();
-        }
-      }
-
-      function stopSpeaking() {
-        STATE.slots.forEach((_, i) => teardownTtsQueue(i));
-        if (VOICE.ttsSupported) {
-          try { window.speechSynthesis.cancel(); } catch {}
-        }
-        STATE.slots.forEach(s => { s.isSpeaking = false; });
-        TTS_STATE.speakingSlot = null;
-        VOICE.playingMsg = null;
-        markTtsEnded();
-        render();
-      }
+      // The recognizer stays live at all times while listening is on. The
+      // echo guards above are retained from the original tool (they are
+      // inert now that nothing is ever spoken aloud) so the listening
+      // pipeline that calls them is unchanged.
 
       /* ================================================================
        * SPEECH RECOGNITION — one engine, default microphone only
@@ -2027,13 +1219,13 @@
           if (e.error === 'not-allowed') {
             VOICE.permissionDenied = true;
             stopListening({ silent: true });
-            showToast('Randy needs microphone access — allow the mic and try again');
+            showToast('Microphone access is needed — allow the mic and try again');
             return;
           }
           if (e.error === 'service-not-allowed') {
             // Usually a transient hiccup in Chrome's cloud speech service (a
             // network blip, another tab grabbing the recognizer) — NOT a real,
-            // permanent block. Killing listening here is what left Randy frozen
+            // permanent block. Killing listening here is what left the tool frozen
             // after a momentary glitch. Rebuild the recognizer and keep going.
             if (VOICE.wantRunning && recognitionWanted()) {
               setTimeout(() => { try { hardResetRecognition(); } catch {} }, 400);
@@ -2046,7 +1238,7 @@
           }
           if (e.error === 'audio-capture') {
             stopListening({ silent: true });
-            showToast("Randy couldn't use the microphone — check that one is plugged in");
+            showToast("Couldn't use the microphone — check that one is plugged in");
             return;
           }
           // Transient errors (no-speech, aborted, network) fall through to
@@ -2212,238 +1404,23 @@
       }
 
       /* ================================================================
-       * DICTATION — push-to-talk voice typing in the pop-out composer
-       *
-       * A SECOND, independent recognizer. The Web Speech API only runs one
-       * recognizer at a time, so while dictation captures the mic Randy's
-       * passive listener is paused (VOICE.dictationPaused) and resumed the
-       * moment dictation stops. Dictation never auto-sends — it streams the
-       * transcript into #pip-input — and it never cuts the user off: Chrome
-       * silently ends a recognition session after a pause, so onend restarts
-       * it for as long as the user keeps dictating.
-       * ================================================================ */
-
-      // Is dictation currently typing into this home composer slot?
-      function isHomeDictating(slotIdx) {
-        const t = VOICE.dictationTarget;
-        return !!(VOICE.dictating && t && t.kind === 'home' && t.slot === slotIdx);
-      }
-
-      // Resolve the live input element dictation is currently writing into —
-      // either the pop-out composer or a home composer slot. Never throws.
-      function dictationInputEl() {
-        const t = VOICE.dictationTarget;
-        if (!t) return null;
-        if (t.kind === 'home') {
-          return document.getElementById('home-input-' + t.slot);
-        }
-        // Default / 'pip': the pop-out window's input (a separate document).
-        const w = PIP.window;
-        if (!w || w.closed) return null;
-        try { return w.document.getElementById('pip-input'); } catch { return null; }
-      }
-
-      // Write the staged dictation text (+ optional live interim) into the
-      // active input. Never throws — the pop-out window can vanish mid-write.
-      function syncDictationInput(interim) {
-        const input = dictationInputEl();
-        if (!input) return;
-        const base = VOICE.dictationBase || '';
-        const it = (interim || '').trim();
-        const val = it ? (base ? base.replace(/\s+$/, '') + ' ' + it : it) : base;
-        try {
-          input.value = val;
-          input.selectionStart = input.selectionEnd = val.length;
-          input.scrollLeft = input.scrollWidth;
-        } catch {}
-        // A home composer write fires no 'input' event, so keep STATE and the
-        // send button's disabled state in sync by hand (the pop-out has its own).
-        const t = VOICE.dictationTarget;
-        if (t && t.kind === 'home' && STATE.slots[t.slot]) {
-          STATE.slots[t.slot].inputText = val;
-          const sendBtn = document.querySelector('[data-action="send-home"][data-idx="' + t.slot + '"]');
-          if (sendBtn) {
-            const dis = !!STATE.slots[t.slot].loading || !val.trim();
-            if (sendBtn.disabled !== dis) sendBtn.disabled = dis;
-          }
-        }
-      }
-
-      // Fold a finalized chunk into the staged dictation text with sane spacing.
-      function appendDictationFinal(chunk) {
-        const add = (chunk || '').trim();
-        if (!add) return;
-        const base = VOICE.dictationBase || '';
-        VOICE.dictationBase = base ? base.replace(/\s+$/, '') + ' ' + add : add;
-      }
-
-      function ensureDictationRecognition() {
-        if (!VOICE.srSupported) return null;
-        if (VOICE.dictation) return VOICE.dictation;
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        const r = new SR();
-        r.continuous = true;
-        r.interimResults = true;
-        r.lang = 'en-US';
-        r.onresult = (e) => {
-          let interim = '';
-          let finalChunk = '';
-          for (let i = e.resultIndex; i < e.results.length; i++) {
-            const res = e.results[i];
-            const t = res[0] && res[0].transcript ? res[0].transcript : '';
-            if (res.isFinal) finalChunk += t + ' ';
-            else interim += t;
-          }
-          if (finalChunk) appendDictationFinal(finalChunk);
-          syncDictationInput(interim);
-        };
-        r.onerror = (e) => {
-          if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-            showToast('Randy needs microphone access — allow the mic and try again');
-            stopDictation();
-            return;
-          }
-          if (e.error === 'audio-capture') {
-            showToast("Randy couldn't use the microphone — check that one is plugged in");
-            stopDictation();
-            return;
-          }
-          // Transient errors (no-speech, aborted, network) fall through to
-          // onend, which restarts while the user is still dictating.
-        };
-        r.onend = () => {
-          if (VOICE.dictating) {
-            // Chrome ended the session after a pause but the user hasn't
-            // stopped — restart so a long answer is never cut off. start()
-            // can throw while the old session tears down; retry with backoff.
-            const tryStart = (attempt) => {
-              if (!VOICE.dictating) return;
-              try { r.start(); }
-              catch (err) {
-                if (attempt < 4) setTimeout(() => tryStart(attempt + 1), 250 * (attempt + 1));
-              }
-            };
-            tryStart(0);
-            return;
-          }
-          // Dictation finished — settle the input to the finalized text
-          // (drop any dangling interim) and bring Randy's listener back.
-          syncDictationInput('');
-          resumePassiveAfterDictation();
-        };
-        VOICE.dictation = r;
-        return r;
-      }
-
-      // Bring Randy's passive listener back after dictation, if it was on.
-      function resumePassiveAfterDictation() {
-        if (!VOICE.dictationPaused) return;
-        VOICE.dictationPaused = false;
-        if (!VOICE.wantRunning || !recognitionWanted()) return;
-        const tryStart = (attempt) => {
-          if (!VOICE.wantRunning || !recognitionWanted() || VOICE.dictationPaused) return;
-          try { startRecognitionNow(); }
-          catch (err) {
-            if (attempt < 4) setTimeout(() => tryStart(attempt + 1), 250 * (attempt + 1));
-          }
-        };
-        tryStart(0);
-      }
-
-      function toggleDictation(target) {
-        if (!VOICE.srSupported) { showToast('Voice typing needs Chrome or Edge'); return; }
-        if (VOICE.dictating) stopDictation();
-        else startDictation(target);
-      }
-
-      function startDictation(target) {
-        if (!VOICE.srSupported || VOICE.dictating) return;
-        const r = ensureDictationRecognition();
-        if (!r) return;
-        VOICE.dictating = true;
-        // Default to the pop-out composer for back-compat with its mic button.
-        VOICE.dictationTarget = target || { kind: 'pip' };
-
-        // Seed the staged text from whatever the user already typed, so
-        // dictation appends rather than overwrites.
-        let existing = '';
-        try { existing = (dictationInputEl() || {}).value || ''; } catch {}
-        VOICE.dictationBase = existing.trim();
-
-        // Pause Randy's passive listener so the two recognizers don't fight
-        // over the mic. Keep VOICE.wantRunning intact so resume knows to
-        // restart it. abort() releases the mic fastest; its onend bails out
-        // immediately because dictationPaused is set.
-        if (VOICE.wantRunning && recognitionWanted()) {
-          VOICE.dictationPaused = true;
-          try { VOICE.recognition && VOICE.recognition.abort(); } catch {}
-        }
-
-        // Start the dictation recognizer. The passive recognizer may still be
-        // releasing the mic, so retry with backoff on InvalidStateError.
-        const tryStart = (attempt) => {
-          if (!VOICE.dictating) return;
-          try { r.start(); }
-          catch (err) {
-            if (attempt < 6) setTimeout(() => tryStart(attempt + 1), 200 * (attempt + 1));
-            // Dictation never managed to start. Don't leave the passive
-            // listener stuck paused (dictationPaused === true would freeze it
-            // forever) — give up on dictation and bring Randy back.
-            else { VOICE.dictating = false; resumePassiveAfterDictation(); render(); }
-          }
-        };
-        tryStart(0);
-
-        // Reflect the live mic in the UI first (render() rebuilds the home
-        // composer), then put focus back on the freshly-built input.
-        render();
-        try { const el = dictationInputEl(); if (el) { el.focus(); const n = el.value.length; el.setSelectionRange(n, n); } } catch {}
-      }
-
-      function stopDictation() {
-        if (!VOICE.dictating) {
-          // Already stopped, but make sure the listener isn't stuck paused.
-          resumePassiveAfterDictation();
-          return;
-        }
-        VOICE.dictating = false;       // onend won't restart now
-        if (VOICE.dictation) {
-          try { VOICE.dictation.stop(); } catch {}
-        } else {
-          // No recognizer to fire onend — resume the listener directly.
-          syncDictationInput('');
-          resumePassiveAfterDictation();
-        }
-        render();
-      }
-
-      /* ================================================================
        * PASSIVE LISTENING TEARDOWN
        * ================================================================ */
 
-      // Abort any in-flight reply and stop any audio. Called by stopListening()
-      // and newChat() to cleanly cancel whatever Randy is doing right now.
+      // Reset transient listening UI state. Called by stopListening().
       function abortActiveReply() {
-        STATE.slots.forEach((s, i) => {
-          if (s.abortController) { try { s.abortController.abort(); } catch {} s.abortController = null; }
-          teardownTtsQueue(i);
-          s.loading = false;
-          s.isListening = false;
-        });
-        stopSpeaking();
+        STATE.slots.forEach(s => { s.isListening = false; });
         clearInterim();
       }
 
       // One passive path. Once listening is on, every finalized utterance goes
-      // straight to the technical-question pipeline — no wake word, no
-      // conversation mode, no turn-taking. The only filter is dropping
-      // re-transcriptions of Randy's own read-aloud voice. This keeps working
-      // even while Randy is talking, because the call on the computer keeps
-      // going (mic echo cancellation + isLikelyEcho() guard his own voice out).
+      // straight to the checklist-coverage pipeline — no wake word, no
+      // conversation mode, no turn-taking. The echo guard is retained from the
+      // original tool (inert now that nothing is spoken aloud).
       function handleVoiceTranscript(raw) {
         const text = String(raw).trim();
         if (!text) return;
-        // Drop re-transcriptions of Randy's own voice.
+        // Drop re-transcriptions of the tool's own audio (inert — nothing speaks).
         if (isLikelyEcho(text)) return;
         // Two transcribers can hear the same words — the mic (Web Speech) and
         // the digital computer-audio tap (Whisper). On speakers especially,
@@ -2503,7 +1480,7 @@
       function updateInterim(text) {
         const trimmed = String(text || '').trim();
         if (trimmed.length < 2) { clearInterim(); return; }
-        // Don't flash Randy's own voice back onscreen.
+        // Don't flash the tool's own audio back onscreen (inert — nothing speaks).
         if (isLikelyEcho(trimmed)) { clearInterim(); return; }
         const target = interimTargetSlot();
         if (target === null) { clearInterim(); return; }
@@ -2520,11 +1497,6 @@
         VOICE.interimSlot = target;
         VOICE.interimAt = Date.now();
 
-        // Stream into the pop-out's live band too — patchLiveTranscript()
-        // below can short-circuit the main render, which would otherwise
-        // leave the pop-out transcript stale.
-        if (PIP.window) updatePipLive(STATE.slots[PIP.slotIdx]);
-
         if (patchLiveTranscript(display)) return;
         // One render to mount the node — but never while the user is typing,
         // since render() rebuilds the DOM and would steal composer focus.
@@ -2536,14 +1508,13 @@
       function isComposerFocused() {
         const el = document.activeElement;
         if (!el || !el.id) return false;
-        return el.id === 'expanded-input' || el.id === 'history-search' || el.id.startsWith('home-input-');
+        return el.id === 'ck-new-input' || el.id === 'ck-edit-input' || el.id === 'history-search';
       }
 
       function clearInterim() {
         if (!VOICE.interimText && VOICE.interimSlot === null) return;
         VOICE.interimText = '';
         VOICE.interimSlot = null;
-        if (PIP.window) updatePipLive(STATE.slots[PIP.slotIdx]);
         if (patchLiveTranscript('')) return;
         if (!isComposerFocused()) render();
       }
@@ -2554,13 +1525,13 @@
        * LISTENING — one switch: mic + optional digital computer-audio tap
        * ================================================================ */
 
-      // The big mic button. OFF→ON: open the "How should Randy listen?"
-      // chooser; the chosen mode then drives startListening — one-way
-      // (microphone only) or two-way (microphone + the computer's audio via
-      // the share picker, exactly as before). ON→OFF: stop.
+      // The big mic button. OFF→ON: start listening in the saved capture
+      // mode — one-way (microphone only) or two-way (microphone + the
+      // computer's audio via the share picker, exactly as before).
+      // ON→OFF: stop.
       async function toggleListening() {
         const slot = STATE.slots[0];
-        if (!VOICE.srSupported) { showToast('Randy needs Chrome or Edge to listen'); return; }
+        if (!VOICE.srSupported) { showToast('Listening needs Chrome or Edge'); return; }
         if (slot.listenOn) { stopListening(); return; }
         // No chooser — start with the saved capture mode. One-way (mic only)
         // can auto-start; two-way's screen-share picker rides this click's user
@@ -2592,11 +1563,11 @@
         setTimeout(() => { el.textContent = msg; }, 30);
       }
 
-      // Open the "How should Randy listen?" slider. Pre-selects the last mode
+      // Open the audio-mode slider. Pre-selects the last mode
       // and moves focus into the dialog for keyboard / screen-reader users.
       function openAudioChooser() {
         const slot = STATE.slots[0];
-        if (!VOICE.srSupported) { showToast('Randy needs Chrome or Edge to listen'); return; }
+        if (!VOICE.srSupported) { showToast('Listening needs Chrome or Edge'); return; }
         if (slot.listenOn) return;
         if (slot.audioMode !== 'one-way' && slot.audioMode !== 'two-way') slot.audioMode = 'two-way';
         STATE.audioChooserOpen = true;
@@ -2617,9 +1588,9 @@
         const slot = STATE.slots[0];
         if (slot.listenOn) return 'ok';
         const r = ensureRecognition();
-        if (!r) { if (!auto) showToast('Randy needs Chrome or Edge to listen'); return 'unsupported'; }
+        if (!r) { if (!auto) showToast('Listening needs Chrome or Edge'); return 'unsupported'; }
 
-        // Resolve the capture mode chosen in the "How should Randy listen?"
+        // Resolve the capture mode chosen in the audio-mode
         // slider, falling back to the remembered preference, then two-way.
         const audioMode = (mode === 'one-way' || mode === 'two-way') ? mode
           : (slot.audioMode === 'one-way' ? 'one-way' : 'two-way');
@@ -2658,7 +1629,7 @@
         // shape the held stream — and, on machines where both share the default
         // device, influence what the recognizer overhears acoustically.
         //
-        //   TWO-WAY — audio processing is turned OFF on purpose. Randy must
+        //   TWO-WAY — audio processing is turned OFF on purpose. The tool must
         //     transcribe BOTH the user's voice and the call playing on the
         //     speakers, and the only source the recognizer can use is the
         //     system default microphone, so the computer's sound reaches it
@@ -2676,7 +1647,7 @@
         //     the same way on every machine. (TTS self-echo is handled in
         //     software via VOICE.recentTtsText matching.)
         //
-        //   ONE-WAY — the exact opposite. The user asked Randy to pick up ONLY
+        //   ONE-WAY — the exact opposite. The user asked to pick up ONLY
         //     their own voice and NOT what anyone else is saying, so the
         //     standard processing is turned ON: echo cancellation removes the
         //     call audio leaking from the speakers, while noise suppression and
@@ -2694,15 +1665,15 @@
             // A genuine denial — stop auto-retrying and tell the user how to
             // fix it. A later open starts a fresh context and tries again.
             VOICE.permissionDenied = true;
-            showToast('Randy needs the microphone. Click Allow and try again.');
+            showToast('The microphone is needed. Click Allow and try again.');
           } else if (micStatus === 'no-device') {
-            if (!auto) showToast("Randy couldn't find a microphone — check that one is connected.");
+            if (!auto) showToast("Couldn't find a microphone — check that one is connected.");
           } else {
             // Transient: the device is momentarily busy or the capture stack is
             // still warming up in the instant the panel opens. Stay quiet on the
             // auto path so the retry loop can recover without toast spam; the
             // manual path keeps its original feedback.
-            if (!auto) showToast('Randy needs the microphone. Click Allow and try again.');
+            if (!auto) showToast('The microphone is needed. Click Allow and try again.');
           }
           // Two-way opened the computer-audio share BEFORE this mic prompt (the
           // share picker needs the click's fresh activation). A mic failure here
@@ -2721,14 +1692,14 @@
         TECH.decisions = [];
         startRecognition();
         startAssistWatchdog();
-        startProxyWarmup();   // keep the proxy hot so the first answer skips the cold start
-        // Warn right away if the answer service is unreachable, so "hears
-        // but never answers" can't happen silently.
+        startProxyWarmup();   // keep the proxy hot so the first coverage check skips the cold start
+        // Warn right away if the AI service is unreachable, so "hears but
+        // never checks anything off" can't happen silently.
         loadRemoteConfig().then(() => {
-          if (!PROXY.ready) showToast('⚠ Randy cannot reach his answer service — open Settings');
-          else if (!PROXY.hasKey) showToast('⚠ The answer service has no API key — open Settings');
+          if (!PROXY.ready) showToast('⚠ The AI service is unreachable — items cannot be auto-checked');
+          else if (!PROXY.hasKey) showToast('⚠ The AI service has no API key — items cannot be auto-checked');
         });
-        showToast(twoWay ? 'Randy is listening — your mic and computer audio' : 'Randy is listening to your microphone');
+        showToast(twoWay ? 'Listening — your mic and computer audio' : 'Listening to your microphone');
         render();
         return 'ok';
       }
@@ -2736,7 +1707,7 @@
       // Reliable auto-start. The side panel reloads into a fresh context on
       // every open, and the mic capture can transiently fail in the instant the
       // panel appears (device momentarily busy, capture stack still warming up).
-      // A single attempt that quit on that error would leave Randy silent until
+      // A single attempt that quit on that error would leave listening off until
       // the user taps the orb — so keep retrying with backoff until listening
       // actually sticks, stopping only on success, a real mic denial, an
       // unsupported browser, or no microphone present.
@@ -2776,21 +1747,20 @@
         if (TECH.classifyController) { try { TECH.classifyController.abort(); } catch {} TECH.classifyController = null; }
         TECH.pending = false;
         TECH.pendingSince = 0;
-        TECH.answerSince = 0;
-        abortActiveReply();   // aborts in-flight replies and any TTS
+        abortActiveReply();   // clears transient listening UI state
         stopRecognition();
         stopDesktopCapture();
-        if (!silent && wasOn) showToast('Randy stopped listening');
+        if (!silent && wasOn) showToast('Stopped listening');
         render();
       }
 
-      // Opening Settings while Randy is listening used to glitch the sheet: the
+      // Opening Settings while listening used to glitch the sheet: the
       // live-transcript pipeline calls render() constantly, and render()
       // rebuilds the Settings sheet (it lives inside #app), so inputs lost
       // focus and the page jumped. Pause listening on the way in and remember
-      // the mode so we can resume it on the way out. No-op when Randy is
+      // the mode so we can resume it on the way out. No-op when listening is
       // already off — which is exactly why the glitch never happened from the
-      // "Randy is off" state. Silent so the user doesn't get a "stopped
+      // already-off state. Silent so the user doesn't get a "stopped
       // listening" toast just for opening Settings.
       function pauseListenForSettings() {
         const slot = STATE.slots[0];
@@ -2940,14 +1910,14 @@
             DESKTOP.procNode = proc;
           }
         } catch (err) {
-          showToast('Randy could not set up computer-audio capture — using mic only.');
+          showToast('Could not set up computer-audio capture — using mic only.');
           stopDesktopCapture();
           return;
         }
 
         startWhisperWorker();
         setDesktopStatus('Computer audio: loading transcriber…');
-        showToast('Randy is capturing computer audio');
+        showToast('Capturing computer audio');
       }
 
       function startWhisperWorker() {
@@ -2975,7 +1945,7 @@
           };
           DESKTOP.worker.postMessage({ type: 'init' });
         } catch (err) {
-          // Browser can't spin up the module worker — Randy stays on the mic.
+          // Browser can't spin up the module worker — listening stays on the mic.
           // Silent fallback, no confusing notification.
           console.warn('in-page transcriber unavailable — using mic only:', (err && err.message) || err);
           setDesktopStatus('');
@@ -3025,7 +1995,7 @@
         if (d.type === 'error') {
           DESKTOP.modelLoading = false;
           // The in-browser transcriber couldn't start (WebGPU/WASM/model load).
-          // Randy keeps working on the microphone, so this is not something the
+          // The mic keeps working, so this is not something the
           // user needs to see or act on — surfacing "transcriber unavailable"
           // only confuses people. Fall back to mic-only silently; the detail is
           // left in the console for debugging.
@@ -3199,7 +2169,7 @@
         setDesktopStatus('');
       }
 
-      /* ---------- utterance buffering + classification ---------- */
+      /* ---------- utterance buffering + coverage classification ---------- */
 
       function clearAssistBuffer() {
         TECH.buffer = '';
@@ -3208,17 +2178,15 @@
         if (TECH.bufferTimerId) { clearTimeout(TECH.bufferTimerId); TECH.bufferTimerId = null; }
       }
 
-      // ASR finalizes mid-sentence constantly. Join fragments and classify
-      // only after a quiet gap, so "so how does application workspace" +
-      // "handle third party patching" lands as one question.
+      // ASR finalizes mid-sentence constantly. Join fragments and run the
+      // coverage check only after a quiet gap, so "so let's talk about" +
+      // "the rollout timeline" lands as one utterance.
       function assistIngest(text) {
         const t = String(text || '').trim();
         if (!t) return;
         TECH.buffer = (TECH.buffer + ' ' + t).trim().slice(-ASSIST.MAX_BUFFER_CHARS);
         if (TECH.bufferTimerId) clearTimeout(TECH.bufferTimerId);
-        // Complete-looking questions get a shorter quiet-gap before firing.
-        const delay = isInstantTechQuestion(TECH.buffer) ? ASSIST.DEBOUNCE_FAST_MS : ASSIST.DEBOUNCE_MS;
-        TECH.bufferTimerId = setTimeout(flushAssistBuffer, delay);
+        TECH.bufferTimerId = setTimeout(flushAssistBuffer, ASSIST.DEBOUNCE_MS);
       }
 
       function flushAssistBuffer() {
@@ -3228,7 +2196,7 @@
         const candidate = TECH.buffer.trim();
 
         // The speaker is still mid-sentence (fresh interim words are
-        // arriving) — hold the flush so the question isn't cut off halfway.
+        // arriving) — hold the flush so the utterance isn't cut off halfway.
         // The final transcript re-arms the timer when it lands; bounded so
         // a stale interim can't stall the pipeline.
         if (VOICE.interimText &&
@@ -3240,40 +2208,36 @@
         }
 
         // Reset the join buffer now so any new speech accumulates separately,
-        // whether this candidate is answered immediately or queued.
+        // whether this candidate is checked immediately or queued.
         TECH.buffer = '';
         TECH.deferrals = 0;
         if (!candidate) return;
 
-        // Busy with a previous classify/answer — queue the finalized question
-        // so it's answered in turn instead of being merged into the next
-        // utterance or silently dropped. The queue drains when Randy frees up.
-        if (TECH.pending || slot.loading) {
-          enqueueQuestion(candidate);
+        // A previous coverage check is still in flight — queue the finalized
+        // utterance so it's folded into the window and checked in turn instead
+        // of being merged into the next utterance or silently dropped.
+        if (TECH.pending) {
+          enqueueUtterance(candidate);
           return;
         }
 
         processAssistCandidate(candidate);
       }
 
-      // Push an overheard question onto the FIFO queue, dropping the oldest
-      // (with a visible notice) if the queue is over its cap.
-      function enqueueQuestion(candidate) {
+      // Push an utterance onto the FIFO queue, dropping the oldest if the
+      // queue is over its cap. Dropping is safe here: the utterance stays in
+      // the conversation window, so the next check still sees it.
+      function enqueueUtterance(candidate) {
         TECH.questionQueue.push(candidate);
-        if (TECH.questionQueue.length > ASSIST.MAX_QUEUE) {
-          const dropped = TECH.questionQueue.shift();
-          showToast('Randy is backed up — skipped: "' + truncate(dropped, 40) + '"');
-        }
+        if (TECH.questionQueue.length > ASSIST.MAX_QUEUE) TECH.questionQueue.shift();
         renderAssistStatus();
       }
 
-      // Randy just freed up: answer the next queued question, if any. Each
-      // dequeued item runs through the same processing path as a fresh one
-      // (dedupe → fast-path/classifier → runAssistAnswer).
-      function drainQuestionQueue() {
+      // The classifier just freed up: process the next queued utterance, if
+      // any, through the same path as a fresh one.
+      function drainUtteranceQueue() {
         if (TECH.pending) return;
         const slot = STATE.slots[0];
-        if (slot.loading) return;
         if (!slot.listenOn) { TECH.questionQueue = []; return; }
         if (!TECH.questionQueue.length) return;
         const next = TECH.questionQueue.shift();
@@ -3281,14 +2245,13 @@
         processAssistCandidate(next);
       }
 
-      // Self-healing watchdog — the backstop behind the per-call timeouts, and
-      // the reason a heard question can NEVER leave Randy frozen on "Analyzing"
-      // or "Researching." It mirrors the recognizer's startRecognitionWatchdog:
-      // every few seconds it looks for a stage that has been busy far longer
-      // than its own timeout should ever allow and un-sticks it. The mic stream
-      // held by startListening keeps this interval firing even in a background
-      // tab. In normal operation it never acts — the per-call timeouts settle
-      // everything first; this only earns its keep if something slips past them.
+      // Self-healing watchdog — the backstop behind the per-call timeout. It
+      // mirrors the recognizer's startRecognitionWatchdog: every few seconds
+      // it looks for a coverage check that has been busy far longer than its
+      // own timeout should ever allow and un-sticks it. The mic stream held by
+      // startListening keeps this interval firing even in a background tab. In
+      // normal operation it never acts — the per-call timeout settles
+      // everything first; this only earns its keep if something slips past it.
       function startAssistWatchdog() {
         if (TECH.watchdogId) return;
         TECH.watchdogId = setInterval(assistWatchdogTick, ASSIST.WATCHDOG_MS);
@@ -3303,160 +2266,101 @@
         if (!slot || !slot.listenOn) return;
         const now = Date.now();
 
-        // Classifier wedged: the gate has shown "Analyzing" far longer than the
-        // classify timeout permits. Bump the epoch so the original promise
-        // can't double-fire if it ever wakes, abort the round-trip, and recover
-        // through the shared fallback so an obvious question still gets answered.
+        // Classifier wedged: the coverage check has been in flight far longer
+        // than its timeout permits. Bump the epoch so the original promise
+        // can't double-fire if it ever wakes, abort the round-trip, and move
+        // on. Recovery is conservative by design: nothing gets checked off.
         if (TECH.pending && TECH.pendingSince && now - TECH.pendingSince > ASSIST.PENDING_WEDGE_MS) {
-          console.warn('assist watchdog: classifier wedged — recovering');
+          console.warn('coverage watchdog: classifier wedged — recovering');
           TECH.classifyGen++;
           if (TECH.classifyController) { try { TECH.classifyController.abort(); } catch {} }
           TECH.classifyController = null;
           TECH.pending = false;
           TECH.pendingSince = 0;
-          const stuck = TECH.activeText || '';
-          if (stuck && !slot.loading) assistFallbackDecision(stuck);
-          else { renderAssistStatus(); drainQuestionQueue(); }
-          return;
-        }
-
-        // Answer wedged: "Researching" has been up longer than even a retrying
-        // answer could take. Abort the in-flight fetch — runAssistAnswer's own
-        // catch then frees the slot and drains the queue. If the controller is
-        // somehow gone, free the slot directly so the queue can never stall.
-        if (slot.loading && TECH.answerSince && now - TECH.answerSince > ASSIST.ANSWER_WEDGE_MS) {
-          console.warn('assist watchdog: answer wedged — recovering');
-          if (slot.abortController) {
-            try { slot.abortController.abort(); } catch {}
-          } else {
-            slot.loading = false;
-            TECH.answerSince = 0;
-            render();
-            drainQuestionQueue();
-          }
+          TECH.activeText = '';
+          renderAssistStatus();
+          drainUtteranceQueue();
         }
       }
 
-      // Classify (or fast-path) a finalized candidate and answer it when it
-      // clears the gate. Non-answering paths drain the next queued question so
-      // a skip never strands the rest of the queue.
+      // Run the coverage check for a finalized utterance: fold it into the
+      // rolling conversation window, then ask the classifier whether any
+      // still-unchecked checklist item has now been genuinely covered.
+      // CONSERVATIVE by design — every uncertain or failed path does nothing
+      // and leaves the checklist exactly as it was. Auto-UNchecking does not
+      // exist anywhere in this pipeline.
       function processAssistCandidate(candidate) {
         const words = candidate.split(/\s+/).filter(Boolean);
         if (candidate.length < ASSIST.MIN_CHARS || words.length < ASSIST.MIN_WORDS) {
-          recordAssistDecision(candidate, false, 0, 'too short');
-          renderAssistStatus();
-          drainQuestionQueue();
+          drainUtteranceQueue();
           return;
         }
-        // Repair common ASR garbles of product names ("in tune" → "Intune")
-        // so detection, the answer, and the saved log all read the real
-        // term. The fast-path test below still runs on the RAW candidate, so
-        // a correction can only ever route to the classifier, never create a
-        // new auto-answer.
         const corrected = correctTranscript(candidate);
 
+        // Two transcribers can surface the same words twice — skip a repeat.
         const now = Date.now();
         if (TECH.lastSubmitted && now - TECH.lastSubmittedAt < ASSIST.DEDUPE_MS && fuzzyEqual(corrected, TECH.lastSubmitted)) {
-          drainQuestionQueue();
+          drainUtteranceQueue();
           return;
         }
+        TECH.lastSubmitted = corrected;
+        TECH.lastSubmittedAt = now;
 
         pushAssistContext(corrected);
 
-        // Start the latency timeline for this question (t0 = finalized question
-        // entered the pipeline). runAssistAnswer / the rejection paths finish it.
-        TECH.perf = perfStart(corrected);
-
-        // Fast path: an obvious technical question goes straight to the
-        // answer — no classifier round-trip (saves a couple of seconds). The
-        // out-of-scope guard keeps pricing/contract asks about in-scope
-        // products off the fast path; they fall to the classifier, which
-        // correctly declines them.
-        if (isInstantTechQuestion(candidate) && !OUT_OF_SCOPE_RE.test(candidate)) {
-          recordAssistDecision(corrected, true, 0.85, 'instant');
-          TECH.lastSubmitted = corrected;
-          TECH.lastSubmittedAt = Date.now();
-          runAssistAnswer(0, corrected);
-          return;
-        }
+        // Nothing left for the classifier to check (everything is covered, or
+        // the remaining unchecked items were manually vetoed) — skip the call.
+        const unchecked = classifiableItems();
+        if (!unchecked.length) { renderAssistStatus(); drainUtteranceQueue(); return; }
 
         TECH.pending = true;
         TECH.pendingSince = Date.now();
-        TECH.activeText = corrected;   // surfaced in the live "Analyzing question" band
+        TECH.activeText = corrected;   // surfaced in the live "Checking the list" band
         // New classify cycle. The epoch lets a late resolution be ignored if
-        // the watchdog already gave up on this one and recovered the pipeline,
-        // so a question can never be answered twice. The controller lets the
-        // watchdog abort a wedged round-trip.
+        // the watchdog already gave up on this one, so a stale verdict can
+        // never tick a box. The controller lets the watchdog abort a wedged
+        // round-trip.
         const gen = ++TECH.classifyGen;
         const classifyCtl = new AbortController();
         TECH.classifyController = classifyCtl;
-        const perf = TECH.perf;
-        perfMark(perf, 'classifyStart');
         renderAssistStatus();
-        classifyUtterance(corrected, TECH.context.slice(0, -1), classifyCtl.signal)
+        classifyCoverage(TECH.context.slice(), unchecked, classifyCtl.signal)
           .then(decision => {
             if (gen !== TECH.classifyGen) return;   // superseded by the watchdog — ignore
-            perfMark(perf, 'classifyEnd');
             TECH.pending = false;
             TECH.pendingSince = 0;
             TECH.classifyController = null;
-            // The reply came back but we couldn't read a verdict from it (proxy
-            // didn't forward structured output, or returned prose/empty). Don't
-            // drop an obvious technical question over a format glitch — fall
-            // back to answering, the same net the network-error path uses.
-            if (decision.parsed === false) { assistFallbackDecision(corrected); return; }
-            const conf = typeof decision.confidence === 'number' ? decision.confidence : 0;
-            const accepted =
-              decision.needs_answer === true &&
-              decision.in_scope !== false &&
-              conf >= ASSIST.CONF_THRESHOLD;
-            // Near-miss: a flagged need that landed just under the bar. Logged
-            // so the live strip can offer a one-tap "answer this?" chip.
-            const nearMiss = !accepted && decision.needs_answer === true &&
-              decision.in_scope !== false && conf >= 0.4 && conf < ASSIST.CONF_THRESHOLD;
-            recordAssistDecision(corrected, accepted, conf, decision.topic || '', nearMiss);
-            if (!accepted) { perfFinish(perf, 'rejected'); renderAssistStatus(); drainQuestionQueue(); return; }
-            // Answer the classifier's clean rewrite when it produced one: it
-            // turns a statement-form need into an explicit question and
-            // resolves garble/follow-up references. Fall back to the corrected
-            // transcript if the rewrite is missing or implausibly short.
-            const nq = decision.normalized_question || '';
-            const toAnswer = nq.length >= ASSIST.MIN_CHARS ? nq : corrected;
-            TECH.lastSubmitted = corrected;
-            TECH.lastSubmittedAt = Date.now();
-            runAssistAnswer(0, toAnswer);
+            TECH.activeText = '';
+            // A reply we couldn't read as a verdict (proxy didn't forward
+            // structured output, or returned prose/empty) is treated exactly
+            // like "not covered": conservative, nothing changes.
+            if (decision.parsed !== false) {
+              const conf = typeof decision.confidence === 'number' ? decision.confidence : 0;
+              const item = (decision.covered === true && decision.item_id)
+                ? unchecked.find(i => i.id === decision.item_id)
+                : null;
+              // The gate: the classifier must (1) say covered, (2) name a real
+              // still-unchecked item, and (3) clear the HIGH confidence bar.
+              const accepted = !!item && conf >= ASSIST.CONF_THRESHOLD;
+              recordAssistDecision(corrected, accepted, conf, item ? item.text : '');
+              if (accepted) autoCheckChecklistItem(item.id, decision.evidence || '');
+            }
+            renderAssistStatus();
+            drainUtteranceQueue();
           })
           .catch(err => {
             if (gen !== TECH.classifyGen) return;   // superseded by the watchdog — ignore
             TECH.pending = false;
             TECH.pendingSince = 0;
             TECH.classifyController = null;
-            console.error('classifier failed:', err);
-            toastPipelineError("Randy couldn't check a question", err);
-            // Keep the SE alive: obvious technical questions are answered even
-            // when the classifier times out or its service is unreachable.
-            assistFallbackDecision(corrected);
+            TECH.activeText = '';
+            console.error('coverage classifier failed:', err);
+            toastPipelineError("Couldn't check the conversation against the list", err);
+            // Conservative failure mode: nothing is checked off; the utterance
+            // stays in the window for the next check.
+            renderAssistStatus();
+            drainUtteranceQueue();
           });
-      }
-
-      // Classifier unusable — it timed out, its service is down, or the reply
-      // couldn't be read as a verdict. Keep the SE alive instead of dropping
-      // the utterance: an obvious technical question still gets answered, and
-      // anything else is logged so the queue moves on. Shared by the
-      // parse-failure, network-error, and watchdog paths so a dead or garbled
-      // gate can never strand a question Randy already heard.
-      function assistFallbackDecision(text) {
-        if (looksLikeTechQuestion(text)) {
-          recordAssistDecision(text, true, 0.7, 'fallback match');
-          TECH.lastSubmitted = text;
-          TECH.lastSubmittedAt = Date.now();
-          runAssistAnswer(0, text);
-        } else {
-          recordAssistDecision(text, false, 0, 'check unavailable');
-          perfFinish(TECH.perf, 'dropped');
-          renderAssistStatus();
-          drainQuestionQueue();
-        }
       }
 
       function pushAssistContext(text) {
@@ -3464,9 +2368,9 @@
         while (TECH.context.length > ASSIST.CONTEXT_LEN) TECH.context.shift();
       }
 
-      function recordAssistDecision(text, accepted, confidence, topic, nearMiss) {
+      function recordAssistDecision(text, accepted, confidence, topic) {
         TECH.heard++;
-        TECH.decisions.push({ text, accepted: !!accepted, confidence: Number(confidence) || 0, topic: topic || '', nearMiss: !!nearMiss, ts: Date.now() });
+        TECH.decisions.push({ text, accepted: !!accepted, confidence: Number(confidence) || 0, topic: topic || '', ts: Date.now() });
         while (TECH.decisions.length > ASSIST.DECISIONS_KEEP) TECH.decisions.shift();
       }
 
@@ -3483,56 +2387,52 @@
         return n(a) === n(b);
       }
 
-      // Status-only refresh that respects composer focus (a full render would
+      // Status-only refresh that respects input focus (a full render would
       // steal the caret mid-typing; in that case skip — the next natural
       // render catches up).
       function renderAssistStatus() {
         if (!isComposerFocused()) render();
       }
 
-      async function classifyUtterance(text, contextArr, signal) {
-        if (!GSHEET_WEBHOOK) return { needs_answer: false, confidence: 0, parsed: true };
+      // One coverage check. Same plumbing as the original classifier — the
+      // same proxy, the same postChat call shape, the same structured-output
+      // mechanism — only the prompt, schema and inputs changed.
+      async function classifyCoverage(contextArr, uncheckedItemsArr, signal) {
+        if (!GSHEET_WEBHOOK) return { covered: false, confidence: 0, parsed: true };
+        const itemLines = (uncheckedItemsArr || []).map(i => '- ' + i.id + ': ' + i.text).join('\n');
         const ctxLines = (contextArr || []).map((u, i) => (i + 1) + '. ' + u).join('\n');
         const userContent =
-          (ctxLines ? 'Recent context (older first):\n' + ctxLines + '\n\n' : '') +
-          'Latest utterance:\n' + text;
+          'Checklist items still unchecked:\n' + itemLines + '\n\n' +
+          'Recent conversation window (oldest first):\n' + ctxLines;
         const data = await postChat({
           model: MODELS.classifier,
           max_tokens: 200,
-          system: CLASSIFIER_SYSTEM,
+          system: COVERAGE_SYSTEM,
           messages: [{ role: 'user', content: userContent }],
-          output_config: { format: { type: 'json_schema', schema: CLASSIFIER_SCHEMA } },
-          save: false // keep classifier churn out of the history sheet
+          output_config: { format: { type: 'json_schema', schema: COVERAGE_SCHEMA } },
+          save: false // keep classifier churn out of the usage sheet
         }, signal, ASSIST.CLASSIFY_TIMEOUT_MS);
-        return parseClassifierReply(String(data.reply || ''));
+        return parseCoverageReply(String(data.reply || ''));
       }
 
       // Structured outputs guarantee valid JSON, but parse defensively anyway
-      // (older proxy deployments may not forward output_config). Stays
-      // backward-compatible with the old schema: a reply that only carries the
-      // legacy is_question field still produces a usable needs_answer verdict.
-      // parsed:false flags a reply we could not read as a verdict (no JSON, or
-      // JSON that didn't parse) — distinct from a genuine needs_answer:false.
-      // The caller uses it to fall back to answering an obvious technical
-      // question instead of silently dropping it over a format glitch.
-      function parseClassifierReply(reply) {
+      // (older proxy deployments may not forward output_config). parsed:false
+      // flags a reply we could not read as a verdict — the caller treats it
+      // conservatively and checks nothing off.
+      function parseCoverageReply(reply) {
         const m = reply.match(/\{[\s\S]*\}/);
-        if (!m) return { needs_answer: false, confidence: 0, parsed: false };
+        if (!m) return { covered: false, confidence: 0, parsed: false };
         try {
           const j = JSON.parse(m[0]);
-          const needs = typeof j.needs_answer === 'boolean' ? j.needs_answer : !!j.is_question;
           return {
-            needs_answer: needs,
-            is_question: typeof j.is_question === 'boolean' ? j.is_question : needs,
-            in_scope: typeof j.in_scope === 'boolean' ? j.in_scope : true,
-            normalized_question: typeof j.normalized_question === 'string' ? j.normalized_question.trim() : '',
+            covered: j.covered === true,
+            item_id: typeof j.item_id === 'string' ? j.item_id.trim() : '',
             confidence: typeof j.confidence === 'number' ? j.confidence : 0,
-            topic: j.topic || '',
-            reason: j.reason || '',
+            evidence: typeof j.evidence === 'string' ? j.evidence.trim() : '',
             parsed: true
           };
         } catch {
-          return { needs_answer: false, confidence: 0, parsed: false };
+          return { covered: false, confidence: 0, parsed: false };
         }
       }
 
@@ -3597,12 +2497,9 @@
         }
       }
 
-      // Fire-and-forget Q&A save (the proxy's legacy save action). Chat calls
-      // send save:false so the proxy skips its synchronous sheet append —
-      // that append cost ~0.5-2s of SpreadsheetApp time on every answer's
-      // critical path. Saving from here instead happens after the answer is
-      // already on screen. This is the silent per-session log: rows go UP to
-      // the sheet tagged with session_id, and nothing is ever read back.
+      // Fire-and-forget save (the proxy's legacy save action). The checklist
+      // tool answers no questions, so nothing calls this anymore — it is
+      // retained untouched as documentation of the proxy's save channel.
       function postSaveToSheet({ question, answer, sources, model, sessionId }) {
         if (!GSHEET_WEBHOOK || !question || !answer) return Promise.resolve();
         return fetch(GSHEET_WEBHOOK, {
@@ -3625,480 +2522,6 @@
         }).catch(err => console.warn('Background save failed:', err));
       }
 
-      // System prompt as a block array so the stable persona prefix is
-      // eligible for Anthropic prompt caching.
-      function systemBlocks(text) {
-        return [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
-      }
-
-      function conversationPayloadMessages(slot, cap) {
-        return slot.messages
-          .filter(m => (m.role === 'user' || m.role === 'assistant') && m.content)
-          .slice(-cap)
-          .map(m => ({ role: m.role, content: m.content }));
-      }
-
-      /* ---------- conversational sends (typed input) ---------- */
-
-      async function sendMessage(idx) {
-        const slot = STATE.slots[idx];
-        // Claim the slot synchronously so near-simultaneous callers (voice
-        // finalization + Enter key) can't double-send.
-        if (slot.loading) return;
-        const text = slot.inputText.trim();
-        if (!text) return;
-        // If the user was voice-typing into this composer, end dictation so the
-        // mic is freed and Randy's passive listener resumes.
-        if (isHomeDictating(idx)) stopDictation();
-        slot.loading = true;
-
-        slot.messages.push({ role: 'user', content: text });
-        slot.inputText = '';
-
-        const controller = new AbortController();
-        slot.abortController = controller;
-
-        slot.messages.push({ role: 'assistant', content: '' });
-        const assistantMsgIdx = slot.messages.length - 1;
-
-        // If the pop-out is sitting collapsed, a new question should bring
-        // it back so the reply is visible.
-        pipAutoExpand();
-        render();
-        scrollChat();
-
-        try {
-          // Typed chat answers use the exact same recipe as the overheard
-          // voice path (ASSIST_STYLE, same effort, same search config, same
-          // reply parsing) so the format and sources are identical no matter
-          // how the question arrived. Two differences: typed chat keeps the
-          // full multi-turn thread for follow-ups, and it answers in one shot
-          // rather than streaming token-by-token the way the voice path does.
-          const sessionIdAtSend = SESSION_ID;
-
-          // Strictly source only from the approved doc URLs. Without this,
-          // chat web_search ran against the open web and could surface facts
-          // from unvetted sites — the cause of inaccurate answers. Mirror the
-          // technical-assist path: restrict to the allow-list, and fall back to
-          // the default research domains so a wiped Settings box can never
-          // silently re-open the whole web.
-          const domains = (slot.allowedDomains || []).filter(Boolean);
-          const allowed = domains.length ? domains : DEFAULT_RESEARCH_DOMAINS.slice();
-          const tool = { type: SEARCH_TOOL, name: 'web_search', max_uses: ASSIST.SEARCH_MAX_USES, allowed_domains: allowed };
-
-          // The empty assistant placeholder is already excluded by the
-          // content filter inside conversationPayloadMessages.
-          const baseBody = {
-            model: MODELS.chat,
-            max_tokens: 1100,
-            // Match the voice path's reasoning effort so identical questions
-            // get identical answers. (Older proxy deployments drop this
-            // field harmlessly.)
-            output_config: { effort: 'medium' },
-            system: systemBlocks(slot.prompt + '\n\n' + ASSIST_STYLE),
-            messages: conversationPayloadMessages(slot, 20),
-            // Skip the proxy's synchronous sheet append; saved from the
-            // client below, off the answer's critical path.
-            save: false
-          };
-          let data;
-          // Preferred path: stream the typed/highlight answer through the edge
-          // proxy when one is configured, exactly as the voice path does — the
-          // reply fills the panel live instead of appearing only once fully
-          // generated. Any transport failure (not a user cancel) falls through
-          // to the non-streaming Apps Script path below, so configuring
-          // STREAM_WEBHOOK can never make Randy worse. perfMark tolerates a null
-          // perf, so no timeline is needed here.
-          if (STREAM_WEBHOOK) {
-            try {
-              const r = await streamAssistReply(Object.assign({ tools: [tool] }, baseBody), controller.signal, idx, assistantMsgIdx, null);
-              data = { reply: r.reply, sources: r.sources, usage: r.usage };
-            } catch (err) {
-              if (err && err.name === 'AbortError') throw err;
-              console.warn('streaming answer failed — falling back to non-streaming proxy:', err);
-            }
-          }
-          if (!data) {
-            try {
-              data = await postChat(Object.assign({ tools: [tool] }, baseBody), controller.signal);
-            } catch (err) {
-              if (err && err.name === 'AbortError') throw err;
-              // Web search failed (tool rejected, timeout, transient error) —
-              // answer from knowledge rather than staying silent. Same fallback
-              // the voice path uses.
-              console.error('search-enabled answer failed, retrying without tools:', err);
-              data = await postChat(baseBody, controller.signal);
-            }
-          }
-
-          // Parse exactly like the voice path: strip any false-start preamble,
-          // split off the spoken summary so Read aloud speaks the short version.
-          const { main, spoken } = splitSpoken(String(data.reply || ''));
-          const msg = slot.messages[assistantMsgIdx];
-          msg.content = sanitizeAssistAnswer(main) || 'No response.';
-          msg.spoken = spoken;
-          if (Array.isArray(data.sources) && data.sources.length) {
-            msg.sources = data.sources.slice(0, 6);
-          }
-          // Auto-copy the answer so it's ready to paste — same text the manual
-          // copy button would put on the clipboard (stripMarkdown of content).
-          autoCopyAnswer(stripMarkdown(msg.content));
-          notePipAnswerArrived();
-
-          // Background save (the proxy only saved non-empty replies; mirror that).
-          postSaveToSheet({
-            question: text,
-            answer: String(data.reply || ''),
-            sources: data.sources,
-            model: MODELS.chat,
-            sessionId: sessionIdAtSend
-          });
-        } catch (err) {
-          if (err && err.name === 'AbortError') {
-            const placeholder = slot.messages[assistantMsgIdx];
-            if (placeholder && placeholder.role === 'assistant' && !placeholder.content) {
-              slot.messages.splice(assistantMsgIdx, 1);
-            }
-          } else {
-            const placeholder = slot.messages[assistantMsgIdx];
-            const errMsg = '⚠️ ' + (err.message || 'Connection failed. Check your internet connection and try again.');
-            if (placeholder && placeholder.role === 'assistant') placeholder.content = errMsg;
-            else slot.messages.push({ role: 'assistant', content: errMsg });
-            notePipAnswerArrived();
-          }
-        }
-
-        if (slot.abortController === controller) {
-          slot.loading = false;
-          slot.abortController = null;
-        }
-        render();
-        scrollChat();
-      }
-
-      /* ================================================================
-       * STREAMING ANSWER CLIENT (optional — see STREAMING.md / worker.js)
-       *
-       * Reads the edge function's simple SSE protocol — one event per line:
-       *   data: {"type":"text","text":"…"}    incremental answer text
-       *   data: {"type":"sources","sources":[…]}
-       *   data: {"type":"usage","usage":{…}}   (prompt-cache verification)
-       *   data: {"type":"error","error":"…"}
-       *   data: {"type":"done"}
-       * As text arrives it fills the chat panel live (throttled render) and the
-       * spoken summary after ===SPOKEN=== is fed to the EXISTING TTS sentence
-       * queue one finished sentence at a time. Returns the same shape postChat
-       * does ({reply, sources, usage}) so the rest of runAssistAnswer is
-       * unchanged. Throws on transport error so the caller falls back to the
-       * non-streaming Apps Script path.
-       * ================================================================ */
-
-      const SPOKEN_MARKER_RE = /\n?=+\s*SPOKEN\s*=+\s*\n?/i;
-
-      // Split a (possibly partial) reply into the visible answer and the start
-      // index of the spoken portion. While the marker is still forming at the
-      // tail, hide it so a half-typed "===SPOK" never flashes on screen.
-      function streamSpokenSplit(reply) {
-        const m = reply.match(SPOKEN_MARKER_RE);
-        if (m) return { visible: reply.slice(0, m.index), spokenStart: m.index + m[0].length };
-        return { visible: reply.replace(/\n?=+[\sA-Za-z]*$/i, ''), spokenStart: -1 };
-      }
-
-      // Pull whole sentences off the front of `text`, leaving any trailing
-      // partial sentence for the next delta. A '.'/'!'/'?' only ends a sentence
-      // when whitespace follows, so decimals like "3.5" aren't split mid-number.
-      function takeCompleteSentences(text) {
-        const sentences = [];
-        let start = 0;
-        for (let i = 0; i < text.length; i++) {
-          const c = text[i];
-          if (c === '.' || c === '!' || c === '?') {
-            const next = text[i + 1];
-            if (next === undefined) break;            // maybe mid-stream — wait for more
-            if (/\s/.test(next)) {
-              const s = text.slice(start, i + 1).trim();
-              if (s.length >= 2) sentences.push(s);
-              start = i + 1;
-            }
-          }
-        }
-        return { sentences, consumed: start };
-      }
-
-      async function streamAssistReply(body, signal, idx, msgIdx, perf) {
-        const slot = STATE.slots[idx];
-        try { await ensureIdentity(); } catch {}
-        const payload = Object.assign({ action: 'chat', session_id: SESSION_ID }, body, { stream: true });
-        // Same as postChat: carry only the opaque anonymous id to the model,
-        // never the name. The edge proxy forwards it to the Anthropic request.
-        if (IDENTITY.anonId) {
-          payload.metadata = Object.assign({}, payload.metadata, { user_id: IDENTITY.anonId });
-        }
-
-        // Bound the whole stream like postChat does, composing with the caller's
-        // signal so a user cancel / watchdog abort still cuts it.
-        const timer = new AbortController();
-        const timeoutId = setTimeout(
-          () => { try { timer.abort(new DOMException('Request timed out', 'TimeoutError')); } catch { timer.abort(); } },
-          ASSIST.ANSWER_TIMEOUT_MS
-        );
-        const onAbort = () => { try { timer.abort(signal.reason); } catch { timer.abort(); } };
-        if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
-
-        const speakOn = !!slot.speakAnswers;
-        let ttsInit = false, streamedTts = false, gotText = false;
-        let reply = '', sources = [], usage = null;
-        let spokenEmitted = 0, lastRender = 0;
-
-        const onText = (chunk) => {
-          reply += chunk;
-          if (!gotText) { gotText = true; perfMark(perf, 'firstToken'); }
-          const { visible, spokenStart } = streamSpokenSplit(reply);
-          const m = slot.messages[msgIdx];
-          if (m && m.role === 'assistant') m.content = sanitizeAssistAnswer(visible) || '';
-          const now = performance.now();
-          if (now - lastRender > 110) { lastRender = now; if (!isComposerFocused()) render(); }
-          // Feed finished spoken sentences to the TTS queue as they land.
-          if (speakOn && spokenStart !== -1) {
-            const ready = reply.slice(spokenStart + spokenEmitted);
-            const { sentences, consumed } = takeCompleteSentences(ready);
-            if (sentences.length) {
-              if (!ttsInit) { initTtsQueue(idx, signal, msgIdx); ttsInit = true; }
-              for (const s of sentences) {
-                if (!streamedTts) { streamedTts = true; perfMark(perf, 'firstAudio'); }
-                enqueueTtsSentence(idx, s);
-              }
-              spokenEmitted += consumed;
-            }
-          }
-        };
-
-        try {
-          const resp = await fetch(STREAM_WEBHOOK, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify(payload),
-            signal: timer.signal
-          });
-          if (!resp.ok || !resp.body) throw new Error('Stream HTTP ' + resp.status);
-          const reader = resp.body.getReader();
-          const dec = new TextDecoder();
-          let buf = '';
-          for (;;) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            let nl;
-            while ((nl = buf.indexOf('\n')) !== -1) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (!line.startsWith('data:')) continue;
-              const js = line.slice(5).trim();
-              if (!js) continue;
-              let ev; try { ev = JSON.parse(js); } catch { continue; }
-              if (ev.type === 'text' && ev.text) onText(ev.text);
-              else if (ev.type === 'sources') sources = Array.isArray(ev.sources) ? ev.sources : sources;
-              else if (ev.type === 'usage') usage = ev.usage || usage;
-              else if (ev.type === 'error') throw new Error(ev.error || 'stream error');
-            }
-          }
-        } finally {
-          clearTimeout(timeoutId);
-          if (signal) signal.removeEventListener('abort', onAbort);
-        }
-
-        // Flush a trailing spoken sentence with no terminal whitespace, then mark
-        // the queue done so it stops once the last sentence has been spoken.
-        if (speakOn && ttsInit) {
-          const { spokenStart } = streamSpokenSplit(reply);
-          if (spokenStart !== -1) {
-            const tail = reply.slice(spokenStart + spokenEmitted).trim();
-            if (tail.length >= 2) enqueueTtsSentence(idx, tail);
-          }
-          if (slot.ttsQueue) { slot.ttsQueue.done = true; processTtsQueue(idx); }
-        }
-        return { reply, sources, usage, streamedTts };
-      }
-
-      /* ---------- technical-assist answers ---------- */
-
-      async function runAssistAnswer(idx, question) {
-        const slot = STATE.slots[idx];
-        // Busy with another answer — don't drop this question on the floor.
-        // Re-queue it so it's answered the moment the slot frees (drainQueue
-        // pulls it then). A bare `return` here used to strand both this
-        // question and the queue behind it.
-        if (slot.loading) { enqueueQuestion(question); return; }
-        slot.loading = true;
-        TECH.answerSince = Date.now();
-        const perf = TECH.perf;   // timeline opened by processAssistCandidate
-        let answerStatus = 'answered';
-
-        // Every auto-answered question starts a visually fresh chat: the
-        // previous Q&A slides into Saved Conversations so the panel always
-        // shows just the question being answered now. Follow-up context is
-        // preserved separately in TECH.recentPairs.
-        if (collectPairs(slot).length) {
-          if (slot.isSpeaking) stopSpeaking();
-          archiveChatToHistory(slot);
-        }
-
-        slot.messages.push({ role: 'user', content: question, kind: 'assist-q' });
-        const controller = new AbortController();
-        slot.abortController = controller;
-        slot.messages.push({ role: 'assistant', content: '', kind: 'assist' });
-        const assistantMsgIdx = slot.messages.length - 1;
-
-        // A question was overheard — bring the collapsed pop-out icon back
-        // so the user watches the answer arrive.
-        pipAutoExpand();
-        render();
-        scrollChat();
-
-        try {
-          // Context: the last few assist Q&A pairs keep follow-up questions
-          // coherent ("and what about Intune?") without dragging latency.
-          // Pulled from TECH.recentPairs, not the chat — the chat is archived
-          // to History before each new question.
-          const prior = [];
-          for (const p of TECH.recentPairs.slice(-ASSIST.HISTORY_PAIRS)) {
-            prior.push({ role: 'user', content: p.question });
-            prior.push({ role: 'assistant', content: p.answer });
-          }
-
-          // Strictly source only from the approved doc URLs. Fall back to the
-          // default research domains when the Settings box is empty so a wiped
-          // allow-list can never silently re-open the whole web — same hard
-          // enforcement the chat/voice path uses.
-          const domains = (slot.allowedDomains || []).filter(Boolean);
-          const allowed = domains.length ? domains : DEFAULT_RESEARCH_DOMAINS.slice();
-          const tool = { type: SEARCH_TOOL, name: 'web_search', max_uses: ASSIST.SEARCH_MAX_USES, allowed_domains: allowed };
-
-          const sessionIdAtSend = SESSION_ID;
-          const baseBody = {
-            model: MODELS.assist,
-            max_tokens: 1100,
-            // Medium effort trades a sliver of depth for noticeably faster
-            // answers — right for a live call. (Older proxy deployments drop
-            // this field harmlessly.)
-            output_config: { effort: 'medium' },
-            system: systemBlocks(slot.prompt + '\n\n' + ASSIST_STYLE),
-            messages: prior.concat([{ role: 'user', content: question }]),
-            // The proxy's synchronous sheet append would sit on the answer's
-            // critical path — skip it and save from the client afterwards.
-            save: false
-          };
-          let data, streamedTts = false;
-          perfMark(perf, 'answerStart');
-          // Preferred path: stream the answer through the edge proxy when one is
-          // configured. The reply fills the panel live and the spoken summary is
-          // read aloud sentence-by-sentence as it arrives. Any transport failure
-          // (not a user cancel) falls through to the non-streaming Apps Script
-          // path below, so configuring STREAM_WEBHOOK can never make Randy worse.
-          if (STREAM_WEBHOOK) {
-            try {
-              const r = await streamAssistReply(Object.assign({ tools: [tool] }, baseBody), controller.signal, idx, assistantMsgIdx, perf);
-              data = { reply: r.reply, sources: r.sources, usage: r.usage };
-              streamedTts = r.streamedTts;
-            } catch (err) {
-              if (err && err.name === 'AbortError') throw err;
-              console.warn('streaming answer failed — falling back to non-streaming proxy:', err);
-            }
-          }
-          if (!data) {
-            try {
-              data = await postChat(Object.assign({ tools: [tool] }, baseBody), controller.signal);
-            } catch (err) {
-              if (err && err.name === 'AbortError') throw err;
-              // Web search failed (tool rejected, timeout, transient error) —
-              // answer from knowledge rather than staying silent.
-              console.error('search-enabled answer failed, retrying without tools:', err);
-              data = await postChat(baseBody, controller.signal);
-            }
-          }
-          perfMark(perf, 'answerEnd');
-          perfCache(perf, data.usage, 'answer');   // verify the persona prefix is cache-hitting
-
-          const { main, spoken } = splitSpoken(String(data.reply || ''));
-          const msg = slot.messages[assistantMsgIdx];
-          msg.content = sanitizeAssistAnswer(main) || 'No response.';
-          msg.spoken = spoken;
-          if (Array.isArray(data.sources) && data.sources.length) {
-            msg.sources = data.sources.slice(0, 6);
-          }
-          // Auto-copy the answer so it's ready to paste — same text the manual
-          // copy button would put on the clipboard (stripMarkdown of content).
-          autoCopyAnswer(stripMarkdown(msg.content));
-
-          // Streaming already spoke the summary sentence-by-sentence; only the
-          // non-streaming path needs the one-shot read here.
-          if (!streamedTts && slot.speakAnswers && spoken) {
-            perfMark(perf, 'firstAudio');   // spoken summary handed to TTS
-            speakText(spoken, idx, assistantMsgIdx);
-          }
-          notePipAnswerArrived();
-          TECH.answered++;
-          TECH.recentPairs.push({ question, answer: msg.content });
-          while (TECH.recentPairs.length > ASSIST.HISTORY_PAIRS) TECH.recentPairs.shift();
-
-          // Save the raw reply (same text the proxy used to append) in the
-          // background.
-          postSaveToSheet({
-            question,
-            answer: String(data.reply || ''),
-            sources: data.sources,
-            model: MODELS.assist,
-            sessionId: sessionIdAtSend
-          });
-        } catch (err) {
-          if (err && err.name === 'AbortError') {
-            answerStatus = 'aborted';
-            const placeholder = slot.messages[assistantMsgIdx];
-            if (placeholder && placeholder.role === 'assistant' && !placeholder.content) {
-              slot.messages.splice(assistantMsgIdx, 1);
-            }
-          } else {
-            answerStatus = 'error';
-            console.error('assist answer failed:', err);
-            toastPipelineError("Randy couldn't answer", err);
-            const placeholder = slot.messages[assistantMsgIdx];
-            const errMsg = '⚠️ ' + (err.message || 'Connection failed. Check your internet connection and try again.');
-            if (placeholder && placeholder.role === 'assistant') placeholder.content = errMsg;
-            notePipAnswerArrived();
-          }
-        }
-
-        perfFinish(perf, answerStatus);
-        if (slot.abortController === controller) {
-          slot.loading = false;
-          slot.abortController = null;
-          TECH.answerSince = 0;
-        }
-        render();
-        scrollChat();
-        // Randy is free again — answer the next overheard question, if any.
-        drainQuestionQueue();
-      }
-
-      function scrollChat() {
-        setTimeout(() => {
-          const el = document.getElementById('chat-scroll');
-          if (el) el.scrollTop = el.scrollHeight;
-          for (let i = 0; i < STATE.slots.length; i++) {
-            const h = document.getElementById('home-scroll-' + i);
-            if (h) h.scrollTop = 0;
-          }
-        }, 50);
-      }
-
-      function clearChat(idx) {
-        if (VOICE.playingMsg && VOICE.playingMsg.slot === idx) stopSpeaking();
-        STATE.slots[idx].messages = [];
-        STATE.slots[idx].inputText = '';
-        STATE.slots[idx].loading = false;
-        render();
-      }
-
       /* ================================================================
        * RENDER
        * ================================================================ */
@@ -4107,7 +2530,7 @@
       // container to the top. Capture positions first and restore after:
       // if the user was at (or near) the bottom, stick to the bottom so the
       // newest answer stays in view; otherwise put them back where they were.
-      const SCROLL_IDS = ['home-scroll-0', 'chat-scroll'];
+      const SCROLL_IDS = ['home-scroll-0'];
 
       function captureScroll() {
         const state = {};
@@ -4176,9 +2599,9 @@
         const l = IDENTITY.userName ? escAttr(IDENTITY.userName.lastName) : '';
         root.innerHTML = `
           <div class="onb-wrap">
-            <div class="onb-card" role="dialog" aria-label="Welcome to Randy">
+            <div class="onb-card" role="dialog" aria-label="Welcome to the Virtual Sales Assistant">
               <div class="onb-logo"><i data-lucide="sparkles" class="w-6 h-6"></i></div>
-              <h1 class="onb-title">Welcome to Randy</h1>
+              <h1 class="onb-title">Welcome</h1>
               <p class="onb-sub">Before we start, what should we call you? We only ask this once.</p>
               <label class="onb-label" for="onb-first">First name</label>
               <input id="onb-first" class="onb-input" type="text" autocomplete="given-name" placeholder="First name" value="${f}" />
@@ -4210,7 +2633,7 @@
           <div class="app-frame">
             ${renderSidebar()}
             <div class="sidebar-scrim ${STATE.historyOpen ? 'show' : ''}" data-action="toggle-history"></div>
-            <main class="main-col" data-screen-label="${STATE.activeTab === 'settings' ? 'Settings' : (HISTORY_VIEW.open ? 'Saved conversation' : 'Chat')}">
+            <main class="main-col" data-screen-label="${STATE.activeTab === 'settings' ? 'Settings' : (HISTORY_VIEW.open ? 'Saved conversation' : 'Checklist')}">
               ${renderMain()}
             </main>
           </div>
@@ -4222,46 +2645,25 @@
         restoreScroll(scroll);
         restoreFocus(focus);
         bindEvents();
-        if (PIP.window) renderPip();
       }
 
-      /* ---------- voice state machine (shared by hero orb + header pill) ---------- */
+      /* ---------- voice state machine (drives the mic orb) ---------- */
 
       function voiceModel(slot, idx) {
         const on = !!slot.listenOn;
-        const isSpeaking = !!slot.isSpeaking;
-        const loading = !!slot.loading;
         const sr = VOICE.srSupported;
 
         if (!sr) return {
           orbClass: 'off', orbInner: '<i data-lucide="mic-off" class="w-8 h-8"></i>',
-          action: 'noop', title: 'Randy needs Chrome or Edge', disabled: true, live: false,
-          statusText: 'Use Chrome or Edge to talk to Randy', statusClass: 'off',
-          pill: 'off', pillLabel: 'Voice needs Chrome', pillIcon: '<i data-lucide="mic-off" class="w-4 h-4"></i>'
-        };
-        if (isSpeaking) return {
-          orbClass: 'speaking', orbInner: '<span class="sound-wave"><span class="sound-wave-bar"></span><span class="sound-wave-bar"></span><span class="sound-wave-bar"></span></span>',
-          action: 'stop-speaking', title: 'Click to stop Randy talking', disabled: false, live: false,
-          statusText: 'Talking…', statusClass: 'speaking',
-          pill: 'speak', pillLabel: 'Stop talking', pillIcon: '<span class="sound-wave vp-wave"><span class="sound-wave-bar"></span><span class="sound-wave-bar"></span><span class="sound-wave-bar"></span></span>'
-        };
-        if (loading) return {
-          orbClass: 'thinking', orbInner: '<span class="orb-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></span>',
-          action: 'cancel-reply', title: 'Click to cancel', disabled: false, live: false,
-          statusText: 'Thinking…', statusClass: '',
-          pill: 'think', pillLabel: 'Thinking…', pillIcon: '<i data-lucide="loader-circle" class="w-4 h-4 vp-spin"></i>'
+          action: 'noop', title: 'Listening needs Chrome or Edge', disabled: true, live: false
         };
         if (on) return {
           orbClass: 'monitor', orbInner: '<i data-lucide="mic" class="w-8 h-8"></i>',
-          action: 'toggle-listen', title: 'Randy is on — click to turn him off', disabled: false, live: true,
-          statusText: 'Listening for questions…', statusClass: 'listening',
-          pill: 'on', pillLabel: 'Listening', pillIcon: '<span class="vp-dot"></span>'
+          action: 'toggle-listen', title: 'Listening is on — click to turn it off', disabled: false, live: true
         };
         return {
           orbClass: 'off', orbInner: '<i data-lucide="mic" class="w-8 h-8"></i>',
-          action: 'toggle-listen', title: 'Click to turn Randy on', disabled: false, live: false,
-          statusText: 'Off — click the mic to start', statusClass: 'off',
-          pill: 'go', pillLabel: 'Turn on Randy', pillIcon: '<i data-lucide="mic" class="w-4 h-4"></i>'
+          action: 'toggle-listen', title: 'Click to start listening', disabled: false, live: false
         };
       }
 
@@ -4285,9 +2687,6 @@
             </div>
             ${confirming ? '' : `
               <div class="sb-item-actions">
-                <button data-action="load-history" data-id="${escAttr(h.id)}" title="Continue in chat" aria-label="Continue in chat">
-                  <i data-lucide="message-circle-plus" class="w-3.5 h-3.5"></i>
-                </button>
                 <button class="danger" data-action="confirm-delete-history" data-id="${escAttr(h.id)}" title="Delete" aria-label="Delete">
                   <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                 </button>
@@ -4299,26 +2698,20 @@
       function renderSidebar() {
         const history = STATE.sessionHistory;
         const filtered = filterHistory(history, STATE.historyQuery);
-        const slot = STATE.slots[0];
         return `
           <aside class="sidebar ${STATE.historyOpen ? 'open' : ''}" data-screen-label="Sidebar">
             <div class="sb-brand">
-              <span class="sb-logo"><span class="lg-re">Re</span>cast</span>
-              <span class="sb-tagline">SE Assistant</span>
+              <span class="sb-logo"><span class="lg-re">Sales</span> Assistant</span>
+              <span class="sb-tagline">Call checklist</span>
               <button class="sb-close" data-action="toggle-history" title="Close menu" aria-label="Close menu">
                 <i data-lucide="x" class="w-4 h-4"></i>
               </button>
             </div>
             <div class="sb-controls">
               <div class="sb-label">Options</div>
-              <button class="sb-ctl" data-action="toggle-speak-answers" title="${slot.speakAnswers ? 'Randy reads each answer out loud' : 'Answers show in the chat only'}">
-                <i data-lucide="${slot.speakAnswers ? 'volume-2' : 'volume-x'}" class="w-4 h-4"></i>
-                <span class="sb-ctl-label">Read answers aloud</span>
-                <span class="sb-switch ${slot.speakAnswers ? 'on' : ''}" role="switch" aria-checked="${!!slot.speakAnswers}" tabindex="0" data-action="toggle-speak-answers" aria-label="Read answers aloud"></span>
-              </button>
-              <button class="sb-ctl danger" data-action="clear-chat" data-idx="0" ${slot.messages.length === 0 ? 'disabled' : ''} title="Clear the current chat">
-                <i data-lucide="trash-2" class="w-4 h-4"></i>
-                <span class="sb-ctl-label">Clear chat</span>
+              <button class="sb-ctl" data-action="reset-checklist" title="Uncheck every checklist item for the next call">
+                <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+                <span class="sb-ctl-label">Reset checklist</span>
               </button>
             </div>
             <div class="sb-divider"></div>
@@ -4336,7 +2729,7 @@
             <div class="sb-label">Conversations</div>
             <div class="sb-list history-panel-open">
               ${history.length === 0 ? `
-                <div class="sb-empty">Finished chats from this visit show up here.<br>History clears when the page closes.</div>
+                <div class="sb-empty">Nothing saved from this visit.<br>History clears when the panel closes.</div>
               ` : filtered.length === 0 ? `
                 <div class="sb-empty">No conversations match &ldquo;${escHtml(truncate(STATE.historyQuery.trim(), 30))}&rdquo;.</div>
               ` : groupHistoryByBucket(filtered).map(g => `
@@ -4356,26 +2749,17 @@
           const entry = STATE.sessionHistory.find(h => h.id === HISTORY_VIEW.open);
           if (entry) return renderSavedView(entry);
         }
-        return renderChat(STATE.slots[0], 0);
-      }
-
-      function renderVoicePill(vm, idx) {
-        return `
-          <button class="vp ${vm.pill}" data-action="${vm.action}" data-idx="${idx}" title="${escAttr(vm.title)}" ${vm.disabled ? 'disabled' : ''}>
-            ${vm.pillIcon}<span class="vp-label">${vm.pillLabel}</span>
-          </button>`;
+        return renderHome(STATE.slots[0], 0);
       }
 
       function renderChatHeader(slot, idx, vm) {
         const on = !!slot.listenOn;
-        const sub = slot.isSpeaking ? 'Talking…'
-          : slot.loading ? 'Thinking…'
-          : vm.live && vm.statusClass === 'listening' && vm.pill === 'live' ? 'Listening to you…'
-          : on ? 'Listening for tech questions'
-          : 'Online · Recast product expert';
+        const sub = TECH.pending ? 'Checking the list\u2026'
+          : on ? 'Listening to your call'
+          : 'Online \u00b7 call checklist';
         return `
           <header class="chat-head">
-            <button class="icon-btn sb-toggle" data-action="toggle-history" title="Conversations" aria-label="Open conversations">
+            <button class="icon-btn sb-toggle" data-action="toggle-history" title="Menu" aria-label="Open menu">
               <i data-lucide="panel-left" class="w-5 h-5"></i>
             </button>
             <div class="chat-avatar ${on ? '' : 'muted'}">${escHtml(slot.label.charAt(0))}<span class="status-dot"></span></div>
@@ -4391,85 +2775,30 @@
           </header>`;
       }
 
-      function renderLiveStrip(slot, idx) {
-        const last = TECH.decisions[TECH.decisions.length - 1];
-        const queued = TECH.questionQueue.length;
-        // Near-miss: the classifier flagged a possible need but landed just
-        // under the answer threshold. Surface it as a tappable "answer this?"
-        // chip so the SE can force the answer with one tap.
-        const nearMiss = (!last || !last.accepted)
-          ? TECH.decisions.slice().reverse().find(d => !d.accepted && d.nearMiss)
-          : null;
-        const baseStats = TECH.answered + ' answered · ' + TECH.heard + ' heard';
-        const stats = TECH.pending
-          ? 'Checking a question…'
-          : (queued ? queued + ' queued · ' + baseStats : baseStats);
-        return `
-          <div class="live-strip">
-            <span class="sound-wave ls-wave" aria-hidden="true"><span class="sound-wave-bar"></span><span class="sound-wave-bar"></span><span class="sound-wave-bar"></span></span>
-            <div class="ls-body">
-              <div class="ls-top">
-                <span class="ls-title">Listening for tech questions</span>
-                <span class="ls-stats ${TECH.pending ? 'busy' : ''}">${escHtml(stats)}</span>
-              </div>
-              ${DESKTOP.on ? `<div class="ls-desktop ${DESKTOP.statusText ? 'on' : ''}" id="desktop-status">${escHtml(DESKTOP.statusText)}</div>` : ''}
-              <div class="ls-live ac-live ${VOICE.interimText ? 'hearing' : ''}" id="live-transcript">
-                <span class="ls-live-text"><span id="live-transcript-text">${escHtml(VOICE.interimText || '')}</span><span class="interim-caret">▊</span></span>
-              </div>
-              ${nearMiss ? `
-                <button class="ls-nearmiss" data-action="force-answer" data-text="${escAttr(nearMiss.text)}" title="Randy skipped this — tap to answer it anyway">
-                  <i data-lucide="help-circle" class="w-3 h-3"></i>
-                  <span>${escHtml(truncate(nearMiss.text, 70))} · answer this?</span>
-                </button>
-              ` : (last ? `
-                <div class="ls-last">
-                  <i data-lucide="${last.accepted ? 'check' : 'minus'}" class="w-3 h-3 ${last.accepted ? 'ok' : 'skip'}"></i>
-                  <span>${escHtml(truncate(last.text, 90))} · ${Math.round((last.confidence || 0) * 100)}%</span>
-                </div>
-              ` : '')}
-            </div>
-            <div class="ls-controls">
-              <label class="ls-speak" title="${slot.speakAnswers ? 'Randy reads each answer out loud' : 'Answers show in the chat only'}">
-                <span>Read aloud</span>
-                <span class="voice-switch ${slot.speakAnswers ? 'on' : ''}" role="switch" aria-checked="${!!slot.speakAnswers}" tabindex="0" data-action="toggle-speak-answers"></span>
-              </label>
-              <button class="ls-off" data-action="toggle-listen" title="Turn Randy off">Turn off</button>
-            </div>
-          </div>`;
-      }
-
-      // What is Randy doing right now? One model drives the console's orb label,
-      // stage badge, and the big live text — mirrors pipLiveModel so the main
-      // stage and the pop-out never disagree.
-      function consoleModel(slot, vm) {
-        if (!VOICE.srSupported) return { stageKey: 'off', orbLabel: 'Unavailable', icon: 'mic-off', label: 'Voice needs Chrome or Edge', sub: 'You can still type your questions below', mode: 'prompt', text: 'Randy listens through the browser\u2019s speech engine, which runs in Chrome or Edge. Type to him here anytime.' };
-        if (slot.isSpeaking) return { stageKey: 'speaking', orbLabel: 'Talking', icon: 'volume-2', label: 'Randy is talking', sub: 'Reading the answer aloud — tap the orb to stop', mode: 'prompt', text: '' };
-        if (slot.loading) {
-          const lastUser = slot.messages.slice().reverse().find(m => m.role === 'user');
-          const researching = lastUser && lastUser.kind === 'assist-q';
-          return { stageKey: 'researching', orbLabel: researching ? 'Researching' : 'Answering', icon: 'search', label: researching ? 'Researching the support docs' : 'Writing the answer', sub: researching ? 'Checking Recast & Microsoft documentation' : 'Putting the answer together', mode: 'question', text: lastUser ? lastUser.content : '' };
-        }
-        if (TECH.pending) return { stageKey: 'analyzing', orbLabel: 'Analyzing', icon: 'scan-search', label: 'Analyzing the question', sub: 'Deciding whether this needs an answer', mode: 'question', text: TECH.activeText || VOICE.interimText || '' };
-        if (slot.listenOn) return { stageKey: 'listening', orbLabel: 'Listening', icon: 'ear', label: 'Listening for questions', sub: 'Randy is on the call — speak naturally', mode: 'transcript', text: VOICE.interimText || '' };
-        return { stageKey: 'off', orbLabel: 'Off', icon: 'mic', label: 'Randy is off', sub: 'Tap the mic to start listening', mode: 'prompt', text: 'Turn Randy on and he listens to your call, spots the technical questions, and answers them right here — or just type below anytime.' };
+      // What is the assistant doing right now? One model drives the console's
+      // stage badge and the big live text.
+      function consoleModel(slot) {
+        if (!VOICE.srSupported) return { stageKey: 'off', label: 'Voice needs Chrome or Edge', mode: 'prompt', text: 'The assistant listens through the browser\u2019s speech engine, which runs in Chrome or Edge.' };
+        if (TECH.pending) return { stageKey: 'analyzing', label: 'Checking the list', mode: 'question', text: TECH.activeText || VOICE.interimText || '' };
+        if (slot.listenOn) return { stageKey: 'listening', label: 'Listening to the call', mode: 'transcript', text: VOICE.interimText || '' };
+        return { stageKey: 'off', label: 'Not listening', mode: 'prompt', text: '' };
       }
 
       // The main stage: status title, the mic (on/off), and live voice-to-text.
       function renderConsole(slot, idx, vm) {
-        const cm = consoleModel(slot, vm);
+        const cm = consoleModel(slot);
 
-        // The live transcript node carries the patchable id ONLY while Randy is
-        // actively hearing the call (listening / speaking), so the in-place
-        // interim patch never clobbers the settled question shown mid-analysis.
-        const liveNode = slot.listenOn && (cm.stageKey === 'listening' || cm.stageKey === 'speaking');
+        // The live transcript node carries the patchable id ONLY while the
+        // assistant is actively hearing the call, so the in-place interim
+        // patch never clobbers the settled utterance shown mid-check.
+        const liveNode = slot.listenOn && cm.stageKey === 'listening';
         let body;
         if (liveNode) {
-          const caret = cm.stageKey === 'listening' ? '<span class="interim-caret">▊</span>' : '';
-          body = `<div class="cl-transcript ac-live ${VOICE.interimText ? 'hearing' : ''}" id="live-transcript"><span id="live-transcript-text">${escHtml(VOICE.interimText || '')}</span>${caret}</div>`;
+          body = `<div class="cl-transcript ac-live ${VOICE.interimText ? 'hearing' : ''}" id="live-transcript"><span id="live-transcript-text">${escHtml(VOICE.interimText || '')}</span><span class="interim-caret">\u258a</span></div>`;
         } else if (cm.mode === 'question') {
-          body = cm.text ? `<div class="cl-transcript">${escHtml(cm.text)}</div>` : `<div class="cl-transcript cl-tr-muted">Working on it…</div>`;
+          body = cm.text ? `<div class="cl-transcript">${escHtml(cm.text)}</div>` : `<div class="cl-transcript cl-tr-muted">Working on it\u2026</div>`;
         } else {
-          body = `<div class="cl-transcript cl-tr-muted">Tap the mic to start listening</div>`;
+          body = `<div class="cl-transcript cl-tr-muted">Tap the mic to start listening \u2014 items below are checked off automatically as you genuinely cover them on the call.</div>`;
         }
 
         return `
@@ -4491,23 +2820,10 @@
           </div>`;
       }
 
-      function renderHomeEmpty(slot) {
-        // The empty home view is intentionally blank — the listening card above
-        // carries the messaging, so no "Hey, I'm Randy" hero/description here.
-        return '';
-      }
+      /* ---------- home screen: listening console + the checklist ---------- */
 
-      function renderChat(slot, idx) {
+      function renderHome(slot, idx) {
         const vm = voiceModel(slot, idx);
-        const hasMsgs = slot.messages.length > 0;
-        // While loading, the trailing assistant message IS the in-flight answer
-        // and already renders as a single "R" bubble — typing dots while it's
-        // empty, then the streaming text (see renderBotMessage). So it carries
-        // the working indicator on its own. Only fall back to a standalone dots
-        // row if, somehow, there's no trailing assistant message to host it, so
-        // the indicator is never doubled (the old "two Randys") nor lost.
-        const lastMsg = slot.messages[slot.messages.length - 1];
-        const placeholderPending = !!(lastMsg && lastMsg.role === 'assistant');
         return `
           ${renderChatHeader(slot, idx, vm)}
           <div class="split-row">
@@ -4516,95 +2832,72 @@
             </div>
             <div class="right-col">
               <div id="home-scroll-${idx}" class="msg-scroll">
-                <div class="msg-col">
-                  ${hasMsgs ? slot.messages.map((m, mi) => `
-                    <div class="msg-row ${m.role === 'user' ? 'me' : ''}">
-                      ${m.role === 'user' ? renderUserMessage(m) : renderBotMessage(slot, m, mi, idx)}
-                    </div>
-                  `).join('') + (slot.loading && !placeholderPending ? `
-                    <div class="msg-row">
-                      <div class="msg-av">${escHtml(slot.label.charAt(0))}</div>
-                      <div class="chat-bubble chat-bot typing"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
-                    </div>
-                  ` : '') : renderHomeEmpty(slot)}
-                </div>
-              </div>
-              <div class="composer-zone">
-                <div class="composer">
-                  <button class="comp-newchat" data-action="new-chat" aria-label="New chat" title="Start a new chat — the current one is saved in the menu">
-                    <i data-lucide="square-pen" class="w-5 h-5"></i>
-                  </button>
-                  <textarea id="home-input-${idx}" class="composer-input" rows="1" placeholder="Message ${escAttr(slot.label)}…" ${slot.loading ? 'disabled' : ''}>${escHtml(slot.inputText || '')}</textarea>
-                  <button class="comp-capture${SELECTION_CAPTURE.armed ? ' armed' : ''}" data-action="ask-selection" data-idx="${idx}" aria-label="${SELECTION_CAPTURE.armed ? 'Capturing highlights — click to stop' : 'Ask about highlighted text'}" aria-pressed="${SELECTION_CAPTURE.armed}" title="${SELECTION_CAPTURE.armed ? 'Capturing — highlight text on the page and it goes to Randy. Click to stop.' : 'Click, then highlight text on the page — it goes straight to Randy.'}">
-                    <i data-lucide="highlighter" class="w-5 h-5"></i>
-                  </button>
-                  ${VOICE.srSupported ? `<button class="comp-mic${isHomeDictating(idx) ? ' live' : ''}" data-action="dictate-home" data-idx="${idx}" title="${isHomeDictating(idx) ? 'Stop voice typing' : 'Voice to text — speak your message'}" aria-label="Voice to text" aria-pressed="${isHomeDictating(idx)}" ${slot.loading ? 'disabled' : ''}>
-                    <i data-lucide="${isHomeDictating(idx) ? 'square' : 'mic'}" class="w-5 h-5"></i>
-                  </button>` : ''}
-                  <button class="comp-send" data-action="send-home" data-idx="${idx}" title="Send message" aria-label="Send message" ${(slot.loading || !(slot.inputText || '').trim()) ? 'disabled' : ''}>
-                    <i data-lucide="arrow-up" class="w-5 h-5"></i>
-                  </button>
-                </div>
+                ${renderChecklist()}
               </div>
             </div>
           </div>`;
       }
 
-      /* ---------- message rendering ---------- */
+      // The visual checklist — the tool's main feature. Unchecked items look
+      // plain; covered items get a checkmark and struck-through/greyed text.
+      // The seller can add, edit, reorder and remove items before and during
+      // a call, and can always tap an item to check/uncheck it manually.
+      function renderChecklist() {
+        const items = CHECKLIST.items;
+        const done = items.filter(i => i.checked).length;
+        return `
+          <div class="ck-panel" data-screen-label="Checklist">
+            <div class="ck-head">
+              <div class="ck-title"><i data-lucide="list-checks" class="w-4 h-4"></i>Call checklist</div>
+              <span class="ck-count">${items.length ? done + ' of ' + items.length + ' covered' : 'No items yet'}</span>
+              <button class="ck-reset" data-action="reset-checklist" ${items.length ? '' : 'disabled'} title="Uncheck everything for the next call">
+                <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>Reset
+              </button>
+            </div>
+            <div class="ck-list">
+              ${items.length
+                ? items.map((it, i) => renderChecklistItem(it, i, items.length)).join('')
+                : `<div class="ck-empty">Add the things you want to cover on this call.<br>They\u2019re checked off automatically as the conversation genuinely covers them \u2014 or tap any item to check it yourself. A reusable default list lives in Settings.</div>`}
+            </div>
+            <div class="ck-add">
+              <input type="text" id="ck-new-input" placeholder="Add something to cover\u2026" value="${escAttr(STATE.newItemText)}" autocomplete="off" aria-label="Add a checklist item" />
+              <button class="ck-add-btn" data-action="add-check-item" title="Add item" aria-label="Add item" ${STATE.newItemText.trim() ? '' : 'disabled'}>
+                <i data-lucide="plus" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </div>`;
+      }
 
-      function renderBotMessage(slot, m, mi, slotIdx) {
-        const av = `<div class="msg-av">${escHtml(slot.label.charAt(0))}</div>`;
-        // One render path for every Randy answer — typed or overheard — so the
-        // format and sources are identical. The "Technical assist" badge is the
-        // only thing unique to overheard questions.
-        const srcs = Array.isArray(m.sources) ? m.sources : [];
-        const badge = m.kind === 'assist'
-          ? `<div class="assist-badge"><i data-lucide="ear" class="w-3 h-3"></i>Technical assist</div>`
-          : '';
-        // While the answer is still arriving the placeholder has no content yet.
-        // Show the typing dots inside this single bubble (keeping the badge) so
-        // there's only ever one "R" avatar while Randy is working — instead of
-        // this empty bubble PLUS a second avatar row of dots (renderChat used to
-        // append that, which read as two Randys for every action in flight).
-        if (!m.content) {
-          const dots = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
-          return badge
-            ? `${av}
-              <div class="msg-wrap"><div class="chat-bubble chat-bot" style="white-space:normal">
-                ${badge}
-                <span class="bubble-dots">${dots}</span>
-              </div></div>`
-            : `${av}
-              <div class="msg-wrap"><div class="chat-bubble chat-bot typing">${dots}</div></div>`;
+      function renderChecklistItem(it, i, total) {
+        if (STATE.editingItemId === it.id) {
+          return `
+            <div class="ck-item editing">
+              <input type="text" id="ck-edit-input" value="${escAttr(STATE.editItemText)}" autocomplete="off" aria-label="Edit item text" />
+              <button class="ck-icon ok" data-action="save-edit-item" data-id="${escAttr(it.id)}" title="Save" aria-label="Save"><i data-lucide="check" class="w-4 h-4"></i></button>
+              <button class="ck-icon" data-action="cancel-edit-item" title="Cancel" aria-label="Cancel"><i data-lucide="x" class="w-4 h-4"></i></button>
+            </div>`;
         }
-        return `${av}
-          <div class="msg-wrap"><div class="chat-bubble chat-bot chat-md" style="padding-right:38px;white-space:normal">
-            ${badge}
-            ${mdToHtml(m.content)}
-            ${srcs.length ? `<div class="src-chips">${srcs.map(u => `
-              <a href="${escAttr(safeHref(u))}" target="_blank" rel="noopener noreferrer" title="${escAttr(u)}">
-                <i data-lucide="link" class="w-3 h-3"></i>${escHtml(sourceLabelOf(u))}
-              </a>`).join('')}</div>` : ''}
-          </div>${copyBtnHtml(slotIdx, mi)}${speakerBtnHtml(slotIdx, mi)}</div>`;
-      }
-
-      function renderUserMessage(m) {
-        const badge = m.kind === 'assist-q'
-          ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:9.5px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;opacity:0.75;margin-bottom:4px"><i data-lucide="ear" class="w-3 h-3"></i>Overheard</span><br>'
-          : '';
-        return `<div class="chat-bubble chat-user">${badge}${escHtml(m.content)}</div>`;
-      }
-
-      function copyBtnHtml(slotIdx, msgIdx) {
-        return `<button class="msg-copy" title="Copy answer" aria-label="Copy answer" data-action="copy-msg" data-slot="${slotIdx}" data-msg="${msgIdx}"><i data-lucide="copy" class="w-3 h-3"></i></button>`;
-      }
-
-      function speakerBtnHtml(slotIdx, msgIdx) {
-        if (!VOICE.ttsSupported) return '';
-        const isPlayingThis = !!(VOICE.playingMsg && VOICE.playingMsg.slot === slotIdx && VOICE.playingMsg.msg === msgIdx);
-        const icon = isPlayingThis ? 'volume-x' : 'volume-2';
-        const title = isPlayingThis ? 'Stop' : 'Speak';
-        return `<button class="tts-btn ${isPlayingThis ? 'playing' : ''}" title="${title}" aria-label="${title}" data-action="tts-speak" data-slot="${slotIdx}" data-msg="${msgIdx}"><i data-lucide="${icon}" class="w-3 h-3"></i></button>`;
+        const checked = !!it.checked;
+        const fresh = checked && it.checkedAt && (Date.now() - it.checkedAt < 5000);
+        const evidence = checked && it.checkedBy === 'auto' && it.evidence
+          ? `<div class="ck-evidence"><i data-lucide="ear" class="w-3 h-3"></i><span>${escHtml(truncate(it.evidence, 90))}</span></div>`
+          : (checked && it.checkedBy === 'you' ? `<div class="ck-evidence you">Checked by you</div>` : '');
+        return `
+          <div class="ck-item ${checked ? 'done' : ''}${fresh ? ' fresh' : ''}">
+            <button class="ck-box ${checked ? 'on' : ''}" role="checkbox" aria-checked="${checked}" data-action="toggle-check-item" data-id="${escAttr(it.id)}" title="${checked ? 'Uncheck' : 'Check off'}" aria-label="${checked ? 'Uncheck' : 'Check off'}: ${escAttr(it.text)}">
+              ${checked ? '<i data-lucide="check" class="w-3.5 h-3.5"></i>' : ''}
+            </button>
+            <div class="ck-body" data-action="toggle-check-item" data-id="${escAttr(it.id)}" role="button" tabindex="0" title="${checked ? 'Tap to uncheck' : 'Tap to check off'}">
+              <div class="ck-text">${escHtml(it.text)}</div>
+              ${evidence}
+            </div>
+            <div class="ck-actions">
+              <button class="ck-icon" data-action="move-check-item" data-id="${escAttr(it.id)}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Move up" aria-label="Move up"><i data-lucide="chevron-up" class="w-4 h-4"></i></button>
+              <button class="ck-icon" data-action="move-check-item" data-id="${escAttr(it.id)}" data-dir="1" ${i === total - 1 ? 'disabled' : ''} title="Move down" aria-label="Move down"><i data-lucide="chevron-down" class="w-4 h-4"></i></button>
+              <button class="ck-icon" data-action="edit-check-item" data-id="${escAttr(it.id)}" title="Edit" aria-label="Edit"><i data-lucide="pencil" class="w-4 h-4"></i></button>
+              <button class="ck-icon danger" data-action="delete-check-item" data-id="${escAttr(it.id)}" title="Remove" aria-label="Remove"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+            </div>
+          </div>`;
       }
 
       /* ---------- saved conversation (read-only, opens in place) ---------- */
@@ -4631,9 +2924,6 @@
                   <button class="btn-ghost" data-action="cancel-delete-history" data-id="${escAttr(entry.id)}">Cancel</button>
                   <button class="btn-danger-solid" data-action="confirm-delete-history-popout" data-id="${escAttr(entry.id)}">Delete</button>
                 ` : `
-                  <button class="btn-primary" style="min-height:40px;padding:8px 18px" data-action="load-history" data-id="${escAttr(entry.id)}">
-                    <i data-lucide="message-circle-plus" class="w-4 h-4"></i>Continue in chat
-                  </button>
                   <button class="icon-btn danger" data-action="confirm-delete-history" data-id="${escAttr(entry.id)}" title="Delete conversation" aria-label="Delete conversation">
                     <i data-lucide="trash-2" class="w-5 h-5"></i>
                   </button>
@@ -4642,11 +2932,11 @@
             </header>
             <div class="msg-scroll">
               <div class="msg-col">
-                <div class="saved-note"><i data-lucide="archive" class="w-3.5 h-3.5"></i>Read-only copy — use &ldquo;Continue in chat&rdquo; to pick it back up</div>
+                <div class="saved-note"><i data-lucide="archive" class="w-3.5 h-3.5"></i>Read-only copy</div>
                 ${entry.pairs.map((p, i) => `
                   <div class="msg-row me"><div class="chat-bubble chat-user">${escHtml(p.question)}</div></div>
                   <div class="msg-row">
-                    <div class="msg-av">R</div>
+                    <div class="msg-av">A</div>
                     <div class="popout-answer">
                       <div class="chat-bubble chat-bot chat-md" style="white-space:normal">${mdToHtml(p.answer)}</div>
                       <button class="popout-copy" data-action="copy-answer" data-id="${escAttr(entry.id)}" data-pair="${i}" title="Copy answer" aria-label="Copy answer">
@@ -4676,47 +2966,27 @@
           </div>`;
       }
 
-      function renderSettingsShell() {
-        return `
-          <header class="chat-head">
-            <button class="icon-btn sb-toggle" data-action="toggle-history" title="Conversations" aria-label="Open conversations">
-              <i data-lucide="panel-left" class="w-5 h-5"></i>
-            </button>
-            <button class="icon-btn" data-action="switch-tab" data-tab="home" title="Back to chat" aria-label="Back to chat">
-              <i data-lucide="arrow-left" class="w-5 h-5"></i>
-            </button>
-            <div class="head-titles">
-              <div class="conv-title">Settings</div>
-              <div class="conv-sub">Listening, persona, research domains &amp; voice</div>
-            </div>
-          </header>
-          <div class="settings-scroll">
-            <div class="settings-col">${renderSettings()}</div>
-          </div>`;
-      }
-
       // Single source of truth for the chooser's per-mode copy, reused by the
       // rendered card and the screen-reader announcement so they never drift.
       function audioModeInfo(mode) {
         return mode === 'one-way'
           ? { label: 'One-way audio', icon: 'mic', sub: 'Microphone only', line: "This will only pick up what you're saying and not what anyone else is saying." }
-          : { label: 'Two-way audio', icon: 'volume-2', sub: 'Microphone + computer audio', line: 'This will pick up your audio and whatever audio is on your computer.' };
+          : { label: 'Two-way audio', icon: 'volume-2', sub: 'Microphone + computer audio', line: 'This will pick up your audio and whatever audio is on your computer — the way to hear the other side of the call.' };
       }
 
-      // "How should Randy listen?" — shown after the user asks to turn Randy
-      // on (see toggleListening → openAudioChooser). The slider picks the
-      // capture mode; the confirm button's click is the user gesture that
-      // startListening() needs for the mic / screen-share prompts.
+      // Audio-mode chooser. The slider picks the capture mode; the confirm
+      // button's click is the user gesture that startListening() needs for
+      // the mic / screen-share prompts.
       function renderAudioChooser() {
         if (!STATE.audioChooserOpen) return '';
         const oneWay = STATE.slots[0].audioMode === 'one-way';
         const desc = audioModeInfo(oneWay ? 'one-way' : 'two-way');
         return `
           <div class="ac-scrim" data-action="close-audio-chooser-bg">
-            <div class="ac-modal" role="dialog" aria-modal="true" aria-label="How should Randy listen?" aria-describedby="ac-desc-text" tabindex="-1">
+            <div class="ac-modal" role="dialog" aria-modal="true" aria-label="How should the assistant listen?" aria-describedby="ac-desc-text" tabindex="-1">
               <button class="ac-x" data-action="close-audio-chooser" title="Cancel" aria-label="Cancel"><i data-lucide="x" class="w-4 h-4"></i></button>
-              <div class="ac-title">How should Randy listen?</div>
-              <p class="ac-sub">Choose how Randy captures audio while he's on.</p>
+              <div class="ac-title">How should it listen?</div>
+              <p class="ac-sub">Choose how audio is captured while listening is on.</p>
               <div class="ac-seg ${oneWay ? 'left' : 'right'}" role="tablist" aria-label="Audio mode">
                 <span class="ac-seg-thumb" aria-hidden="true"></span>
                 <button class="ac-seg-opt ${oneWay ? 'on' : ''}" role="tab" aria-selected="${oneWay}" data-action="set-audio-mode" data-mode="one-way">One-way audio</button>
@@ -4730,7 +3000,7 @@
                 </div>
               </div>
               <button class="ac-go" data-action="confirm-audio-mode">
-                <i data-lucide="mic" class="w-4 h-4"></i>Turn on Randy
+                <i data-lucide="mic" class="w-4 h-4"></i>Start listening
               </button>
             </div>
           </div>`;
@@ -4756,26 +3026,19 @@
               </div>
 
               <div class="full set-listen">
-                <div class="set-h"><i data-lucide="headphones" class="w-4 h-4"></i>How Randy listens</div>
+                <div class="set-h"><i data-lucide="headphones" class="w-4 h-4"></i>How it listens</div>
                 <div class="seg2 ${mode === 'two-way' ? 'right' : 'left'}">
                   <span class="seg2-thumb"></span>
                   <button class="seg2-opt ${mode === 'one-way' ? 'on' : ''}" data-action="pick-audio-mode" data-mode="one-way"><i data-lucide="mic" class="w-3.5 h-3.5"></i>One-way</button>
                   <button class="seg2-opt ${mode === 'two-way' ? 'on' : ''}" data-action="pick-audio-mode" data-mode="two-way"><i data-lucide="volume-2" class="w-3.5 h-3.5"></i>Two-way</button>
                 </div>
                 <p class="set-note">${mode === 'two-way'
-                  ? 'Mic <strong>plus your computer&rsquo;s audio</strong> &mdash; the way to have Randy hear the other side of the call on <strong>headphones</strong>. A screen-share prompt appears; ' + osShareAudioHint() + '. When the capture succeeds you&rsquo;ll see &ldquo;Computer audio connected&rdquo; below.'
+                  ? 'Mic <strong>plus your computer&rsquo;s audio</strong> &mdash; the way to hear the other side of the call on <strong>headphones</strong>. A screen-share prompt appears; ' + osShareAudioHint() + '. When the capture succeeds you&rsquo;ll see &ldquo;Computer audio connected&rdquo; below.'
                   : 'Your <strong>microphone only</strong> &mdash; just what you say, not the call audio on your speakers. Best when you&rsquo;re on <strong>speakers</strong> and only want your own voice picked up.'}</p>
                 ${mode === 'two-way' ? `
                   <button class="set-share" data-action="share-computer-audio"><i data-lucide="monitor-speaker" class="w-4 h-4"></i>${DESKTOP.on ? 'Re-share computer audio&hellip;' : 'Share computer audio&hellip;'}</button>
                   ${DESKTOP.on ? `<div class="set-ok"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i>Computer audio connected</div>` : ''}
                 ` : ''}
-                <div class="set-row">
-                  <div class="set-row-txt">
-                    <div class="set-row-t">Read answers aloud</div>
-                    <div class="set-row-s">Randy speaks each answer in a natural voice</div>
-                  </div>
-                  <span class="voice-switch ${slot.speakAnswers ? 'on' : ''}" role="switch" aria-checked="${!!slot.speakAnswers}" tabindex="0" data-action="toggle-speak-answers"></span>
-                </div>
               </div>
 
               <div>
@@ -4785,7 +3048,7 @@
 
               <div class="full">
                 <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                  <i data-lucide="table" class="w-3 h-3 inline mr-1"></i>Answer Service
+                  <i data-lucide="table" class="w-3 h-3 inline mr-1"></i>AI Service
                 </label>
                 <div class="flex items-center gap-2 text-[11px] font-medium">
                   ${PROXY.ready
@@ -4795,24 +3058,19 @@
                     : `<span style="color:#dc2626"><i data-lucide="x-circle" class="w-3 h-3 inline mr-1"></i>Not reachable${PROXY.error ? ' (' + escHtml(PROXY.error) + ')' : ''}</span>`}
                 </div>
                 <p class="text-[11px] text-slate-400 mt-1">
-                  Randy's answer service is built in — nothing to configure here.
+                  The service that decides when a checklist item has genuinely been covered. Built in — nothing to configure here.
                 </p>
               </div>
 
               <div class="full">
                 <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                  <i data-lucide="file-text" class="w-3 h-3 inline mr-1"></i>Randy's Persona (system prompt core)
+                  <i data-lucide="list-checks" class="w-3 h-3 inline mr-1"></i>Default Checklist (what new calls start from)
                 </label>
-                <textarea id="setting-prompt" rows="8" placeholder="You are Randy, a solution engineer...">${escHtml(slot.prompt)}</textarea>
-                <p class="text-[11px] text-slate-400 mt-1">Defines who Randy is. Formatting rules for chat replies and technical-assist answers are appended automatically and are not editable here.</p>
-              </div>
-
-              <div class="full">
-                <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                  <i data-lucide="globe" class="w-3 h-3 inline mr-1"></i>Research Domains (technical assistance)
-                </label>
-                <textarea id="setting-domains" rows="4" placeholder="docs.recastsoftware.com&#10;docs.liquit.com">${escHtml((slot.allowedDomains || []).join('\n'))}</textarea>
-                <p class="text-[11px] text-slate-400 mt-1">One domain per line. Technical-assist answers research only these sites (support docs). Leave empty to allow the whole web.</p>
+                <textarea id="setting-default-checklist" rows="8" placeholder="Introductions&#10;Understand their current process&#10;Demo the product&#10;Discuss pricing&#10;Agree next steps">${escHtml(CHECKLIST.defaults.join('\n'))}</textarea>
+                <p class="text-[11px] text-slate-400 mt-1">One item per line. Saved with &ldquo;Save Configuration&rdquo; and reused as the starting checklist. &ldquo;Use this list now&rdquo; replaces the current checklist with these items, all unchecked.</p>
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px;margin-top:8px" data-action="apply-default-checklist">
+                  <i data-lucide="list-restart" class="w-3 h-3 inline mr-1"></i> Use this list now
+                </button>
               </div>
 
               <div class="full" style="border-top:1px dashed #e2e8f0;padding-top:16px">
@@ -4830,9 +3088,9 @@
                         .map((d, i) => `<option value="${escAttr(d.deviceId)}"${MIC.deviceId === d.deviceId ? ' selected' : ''}>${escHtml(d.label || ('Microphone ' + (i + 1)))}</option>`)
                         .join('')}
                     </select>
-                    <p class="text-[11px] text-slate-400 mt-1">The microphone Randy opens when he listens. If the default device isn&rsquo;t picking you up, switch here.</p>
-                    <p class="text-[11px] text-slate-400 mt-1"><strong>Important:</strong> Chrome&rsquo;s live transcription always listens to your computer&rsquo;s <strong>default</strong> microphone &mdash; it can&rsquo;t be pointed at a specific device from here. To make Randy hear a particular mic, set it as your default input in <strong>${escHtml(osDefaultMicPath())}</strong>.</p>
-                    ${MIC.deviceId ? `<div class="text-[11px] mt-2" style="color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 10px"><i data-lucide="alert-triangle" class="w-3 h-3 inline mr-1"></i>You&rsquo;ve pinned a specific microphone. Randy will capture it for keep-alive, but live transcription still follows your OS default input &mdash; set the same device as default in <strong>${escHtml(osDefaultMicPath())}</strong> so what Randy hears matches your choice.</div>` : ''}
+                    <p class="text-[11px] text-slate-400 mt-1">The microphone opened while listening. If the default device isn&rsquo;t picking you up, switch here.</p>
+                    <p class="text-[11px] text-slate-400 mt-1"><strong>Important:</strong> Chrome&rsquo;s live transcription always listens to your computer&rsquo;s <strong>default</strong> microphone &mdash; it can&rsquo;t be pointed at a specific device from here. To transcribe a particular mic, set it as your default input in <strong>${escHtml(osDefaultMicPath())}</strong>.</p>
+                    ${MIC.deviceId ? `<div class="text-[11px] mt-2" style="color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 10px"><i data-lucide="alert-triangle" class="w-3 h-3 inline mr-1"></i>You&rsquo;ve pinned a specific microphone. It is captured for keep-alive, but live transcription still follows your OS default input &mdash; set the same device as default in <strong>${escHtml(osDefaultMicPath())}</strong> so what gets heard matches your choice.</div>` : ''}
                     <div class="flex flex-wrap items-center gap-2" style="margin-top:8px">
                       <button class="btn-outline" style="font-size:11px;padding:5px 12px" data-action="refresh-mics">
                         <i data-lucide="refresh-cw" class="w-3 h-3 inline mr-1"></i> Refresh device list
@@ -4852,28 +3110,6 @@
                     ${osDefaultMicLabel() ? `<p class="text-[11px] text-slate-400 mt-2">Your computer&rsquo;s current default input &mdash; what Chrome actually transcribes &mdash; is <strong>${escHtml(osDefaultMicLabel())}</strong>.</p>` : ''}
                   </div>
                 ` : ''}
-
-                ${VOICE.ttsSupported ? `
-                  <div>
-                    <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1">Speaking Voice <span class="text-slate-400 normal-case">(pick one, or let Randy choose the most natural)</span></label>
-                    <select id="setting-voice-list" style="width:100%;padding:10px 14px;border:2px solid #e2e8f0;border-radius:10px;font-size:14px">
-                      ${(() => {
-                        const picked = pickDeepVoice();
-                        const auto = TTS.chosenName === '';
-                        const head = `<option value=""${auto ? ' selected' : ''}>Automatic${picked ? ' — currently ' + escHtml(picked.name) : ''} (recommended)</option>`;
-                        const opts = (window.speechSynthesis.getVoices() || [])
-                          .filter(v => /^en(-|_|$)/i.test(v.lang))
-                          .map(v => `<option value="${escAttr(v.name)}"${TTS.chosenName === v.name ? ' selected' : ''}>${escHtml(v.name)} — ${escHtml(v.lang)}</option>`)
-                          .join('');
-                        return head + (opts || '<option value="" disabled>(voices will load after first click)</option>');
-                      })()}
-                    </select>
-                    <p class="text-[11px] text-slate-400 mt-1">Voices come from your operating system and browser. &ldquo;Natural&rdquo;, &ldquo;Neural&rdquo; or Google voices sound the most human. Your choice is remembered; if it&rsquo;s ever uninstalled Randy falls back to the automatic pick.</p>
-                    <button class="btn-outline" style="font-size:11px;padding:5px 12px;margin-top:8px" data-action="preview-voice" data-idx="${es}">
-                      <i data-lucide="play" class="w-3 h-3 inline mr-1"></i> Preview Voice
-                    </button>
-                  </div>
-                ` : ''}
               </div>
 
               <div class="full flex flex-wrap gap-2 pt-1">
@@ -4883,774 +3119,9 @@
                 <button class="btn-outline" data-action="reset-slot" data-idx="${es}">
                   <i data-lucide="rotate-ccw" class="w-4 h-4 inline mr-1"></i> Reset Defaults
                 </button>
-                <button class="btn-danger" data-action="clear-chat" data-idx="${es}">
-                  <i data-lucide="trash-2" class="w-4 h-4 inline mr-1"></i> Clear Chat History
-                </button>
               </div>
             </div>
           </div>`;
-      }
-
-      /* ================================================================
-       * POP-OUT CHAT (Document Picture-in-Picture, Chrome 116+)
-       *
-       * A compact always-on-top chat window that stays visible while the
-       * user works in other tabs/apps. All voice code (recognition and
-       * TTS) keeps running in THIS tab — the pop-out is a dumb view
-       * over STATE.slots[PIP.slotIdx], refreshed by renderPip() at the end
-       * of every render(). It has its own document, so the main page's
-       * Tailwind classes and delegated listeners don't reach it: it gets a
-       * self-contained stylesheet and listeners bound to its own document.
-       *
-       * Two modes: the full chat, and a collapsed "listening" icon docked
-       * in the bottom-right corner of the screen. PiP windows can't be
-       * moved programmatically, so the dock works the only way Chrome
-       * allows: minimize/expand close the current window and request a
-       * fresh one with preferInitialWindowPlacement, which Chrome places
-       * at its default spot — the bottom-right corner of the work area.
-       * requestWindow() needs transient user activation on this (main)
-       * window; clicks inside the PiP window propagate activation here,
-       * so the swap works for real clicks, and falls back to reshaping
-       * the current window in place when no activation exists.
-       *
-       * When a question arrives while collapsed, the code immediately
-       * tries to bring the chat back so the answer lands in view. With no
-       * gesture anywhere Chrome refuses, and the icon runs a status
-       * sequence instead — thinking dots while answering, then a glowing
-       * badge — and one click anywhere on it reopens the full chat with
-       * the newest answer highlighted.
-       * ================================================================ */
-
-      const PIP_CSS = `
-        :root { --primary:#0372FF; --primary-hover:#0262DB; --navy:#1F289C; --cyan:#31D1FF; --dark:#161F5B; --divider:#DCE2EC; --row:#F5F7FB; --quote:#F0F6FF; }
-        * { box-sizing: border-box; }
-        html, body { height: 100%; }
-        body { margin: 0; display: flex; flex-direction: column; background: var(--row); color: var(--dark); font-family: 'DM Sans', system-ui, sans-serif; }
-        .pip-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--navy); color: #fff; flex-shrink: 0; }
-        .pip-avatar { position: relative; width: 30px; height: 30px; border-radius: 50%; background: var(--primary); display: grid; place-items: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
-        .pip-dot { position: absolute; bottom: -1px; right: -1px; width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; border: 2px solid var(--navy); }
-        .pip-dot.live { background: #10b981; animation: pipPulse 2.2s ease-out infinite; }
-        @keyframes pipPulse { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,0.55); } 70% { box-shadow: 0 0 0 6px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
-        .pip-titles { min-width: 0; }
-        .pip-name { font-size: 13px; font-weight: 600; line-height: 1.2; }
-        .pip-sub { font-size: 10.5px; color: rgba(255,255,255,0.6); line-height: 1.3; }
-        .pip-min { margin-left: auto; width: 26px; height: 26px; border-radius: 7px; border: none; background: rgba(255,255,255,0.12); color: #fff; display: grid; place-items: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
-        .pip-min:hover { background: rgba(255,255,255,0.26); }
-        /* Collapsed mode — the floating "listening" icon. The whole window
-           is one click target; the orb carries the state: green dot while
-           listening, white dots while answering, badge + glow when an
-           answer is waiting. */
-        .pip-mini { display: none; position: relative; flex-direction: column; align-items: center; justify-content: center; gap: 9px; width: 100%; height: 100%; padding: 0; border: none; background: transparent; cursor: pointer; font-family: inherit; }
-        body.pip-collapsed .pip-head, body.pip-collapsed .pip-live, body.pip-collapsed .pip-msgs, body.pip-collapsed .pip-toolbar, body.pip-collapsed .pip-newchat-row, body.pip-collapsed .pip-inputrow { display: none; }
-        body.pip-collapsed .pip-mini { display: flex; }
-        .pip-mini-stage { position: relative; width: 72px; height: 72px; }
-        .pip-mini-ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--cyan); opacity: 0; pointer-events: none; }
-        .pip-mini.is-live .pip-mini-ring { animation: pipRing 2s ease-out infinite; }
-        @keyframes pipRing { 0% { transform: scale(1); opacity: 0.5; } 100% { transform: scale(1.55); opacity: 0; } }
-        .pip-mini-orb { position: relative; width: 72px; height: 72px; border-radius: 50%; background: var(--primary); color: #fff; display: grid; place-items: center; font-size: 26px; font-weight: 700; box-shadow: 0 8px 24px rgba(3,114,255,0.35); transition: transform 0.15s, background 0.15s; }
-        .pip-mini:hover .pip-mini-orb { transform: scale(1.05); background: var(--primary-hover); }
-        .pip-mini-dots { display: none; gap: 5px; }
-        .pip-mini-dots i { width: 8px; height: 8px; border-radius: 50%; background: #fff; animation: pipDot 1.4s infinite ease-in-out both; }
-        .pip-mini-dots i:nth-child(1) { animation-delay: -0.32s; }
-        .pip-mini-dots i:nth-child(2) { animation-delay: -0.16s; }
-        .pip-mini.is-thinking .pip-mini-letter { display: none; }
-        .pip-mini.is-thinking .pip-mini-dots { display: inline-flex; }
-        .pip-mini-dot { position: absolute; bottom: 2px; right: 2px; width: 15px; height: 15px; border-radius: 50%; background: #94a3b8; border: 3px solid var(--row); }
-        .pip-mini-dot.live { background: #10b981; animation: pipPulse 2.2s ease-out infinite; }
-        .pip-mini-badge { position: absolute; top: -5px; right: -5px; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 999px; background: #fff; color: var(--primary); border: 2px solid var(--primary); font-size: 11px; font-weight: 800; display: none; place-items: center; box-shadow: 0 2px 8px rgba(22,31,91,0.25); }
-        .pip-mini.has-unseen .pip-mini-badge { display: grid; }
-        .pip-mini.has-unseen .pip-mini-orb { animation: pipGlow 1.6s ease-in-out infinite; }
-        @keyframes pipGlow { 0%, 100% { box-shadow: 0 8px 24px rgba(3,114,255,0.35); } 50% { box-shadow: 0 0 0 9px rgba(3,114,255,0.16), 0 8px 28px rgba(3,114,255,0.5); } }
-        .pip-mini-label { font-size: 10.5px; font-weight: 600; color: #6B7693; letter-spacing: 0.01em; }
-        .pip-mini.has-unseen .pip-mini-label { color: var(--primary); font-weight: 700; }
-        .pip-new { animation: pipNewFlash 1.8s ease-out 1; }
-        @keyframes pipNewFlash { 0% { box-shadow: 0 0 0 3px rgba(3,114,255,0.5); } 100% { box-shadow: 0 0 0 3px rgba(3,114,255,0); } }
-        .pip-msgs { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-        .pip-empty { margin: auto; max-width: 250px; text-align: center; color: #64748b; font-size: 12.5px; line-height: 1.6; }
-        /* Live listening band — mirrors the main tab's transcript strip:
-           streams the voice-to-text while hearing, then flips to a busy
-           "Processing/Researching" state once a question is identified. */
-        .pip-live { display: none; align-items: flex-start; gap: 10px; padding: 9px 14px; background: var(--quote); border-bottom: 1px solid var(--divider); flex-shrink: 0; }
-        .pip-live.show { display: flex; }
-        .pip-live-ind { display: inline-flex; align-items: center; height: 16px; margin-top: 1px; flex-shrink: 0; }
-        .pip-live-wave { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; }
-        .pip-live-wave i { width: 3px; height: 5px; background: var(--primary); border-radius: 2px; animation: pipWave 1s ease-in-out infinite; }
-        .pip-live-wave i:nth-child(2) { animation-delay: 0.15s; }
-        .pip-live-wave i:nth-child(3) { animation-delay: 0.3s; }
-        @keyframes pipWave { 0%, 100% { height: 4px; } 50% { height: 15px; } }
-        .pip-live-dots { display: none; gap: 3px; align-items: center; }
-        .pip-live-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); animation: pipDot 1.4s infinite ease-in-out both; }
-        .pip-live-dots i:nth-child(1) { animation-delay: -0.32s; }
-        .pip-live-dots i:nth-child(2) { animation-delay: -0.16s; }
-        /* Stage swap: a sound-wave while listening, bouncing dots while Randy
-           analyzes the question and researches the support site. */
-        .pip-live.stage-analyzing .pip-live-wave,
-        .pip-live.stage-researching .pip-live-wave { display: none; }
-        .pip-live.stage-analyzing .pip-live-dots,
-        .pip-live.stage-researching .pip-live-dots { display: inline-flex; }
-        .pip-live-body { min-width: 0; flex: 1; }
-        .pip-live-label { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--primary); line-height: 1.4; transition: color 0.2s; }
-        .pip-live-text { font-size: 12.5px; line-height: 1.45; color: var(--dark); margin-top: 2px; overflow-wrap: break-word; }
-        .pip-live-text:empty { display: none; }
-        /* Per-stage accent — colour the band, indicator and label together so
-           each step reads at a glance. Analyzing = amber, Researching = green. */
-        .pip-live.stage-analyzing { background: #FFFBEB; border-bottom-color: #FDE68A; }
-        .pip-live.stage-analyzing .pip-live-label { color: #B45309; }
-        .pip-live.stage-analyzing .pip-live-dots i { background: #D97706; }
-        .pip-live.stage-analyzing .pip-live-text { color: #92400E; }
-        .pip-live.stage-researching { background: #ECFDF5; border-bottom-color: #A7F3D0; }
-        .pip-live.stage-researching .pip-live-label { color: #047857; }
-        .pip-live.stage-researching .pip-live-dots i { background: #059669; }
-        .pip-live.stage-researching .pip-live-text { color: #065F46; }
-        .pip-live-caret { display: inline-block; margin-left: 1px; color: var(--primary); font-weight: 700; animation: pipCaret 1s steps(1) infinite; }
-        @keyframes pipCaret { 50% { opacity: 0; } }
-        .pip-row { display: flex; justify-content: flex-start; }
-        .pip-row.user { justify-content: flex-end; }
-        .pip-bubble { max-width: 88%; padding: 8px 12px; border-radius: 12px; font-size: 13px; line-height: 1.5; overflow-wrap: break-word; white-space: pre-wrap; }
-        .pip-user { background: var(--primary); color: #fff; border-radius: 12px 12px 4px 12px; }
-        .pip-bot { background: #fff; color: var(--dark); border: 1px solid var(--divider); border-radius: 4px 12px 12px 12px; }
-        .pip-md { white-space: normal; }
-        .pip-bubble.pip-md { position: relative; padding-right: 34px; }
-        .pip-copy { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; padding: 0; border-radius: 6px; border: 1px solid var(--divider); background: #fff; color: #64748b; display: grid; place-items: center; cursor: pointer; transition: color 0.15s, border-color 0.15s, background 0.15s; }
-        .pip-copy:hover { color: var(--primary); border-color: var(--cyan); background: var(--quote); }
-        .pip-copy .ic-check { display: none; }
-        .pip-copy.copied { color: #0F7A3F; border-color: #0F7A3F; }
-        .pip-copy.copied .ic-copy { display: none; }
-        .pip-copy.copied .ic-check { display: block; }
-        .pip-md p { margin: 0 0 7px; }
-        .pip-md p:last-child { margin-bottom: 0; }
-        .pip-md ul, .pip-md ol { margin: 4px 0 8px; padding-left: 18px; }
-        .pip-md li { margin-bottom: 4px; }
-        .pip-md strong { color: var(--navy); }
-        .pip-md code { background: #f1f5f9; padding: 1px 4px; border-radius: 4px; font-size: 12px; }
-        .pip-md a { color: var(--primary); }
-        .pip-md .md-h { font-weight: 700; color: var(--navy); margin: 8px 0 5px; font-size: 12.5px; }
-        .pip-badge { display: block; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.75; margin-bottom: 3px; }
-        .pip-badge.assist { color: var(--primary); opacity: 1; }
-        .pip-src { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; padding-top: 7px; border-top: 1px dashed #e2e8f0; }
-        .pip-src a { font-size: 10px; font-weight: 600; color: #475569; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 999px; padding: 2px 8px; text-decoration: none; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .pip-src a:hover { color: var(--primary); border-color: var(--cyan); background: var(--quote); }
-        .pip-tdot { width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; display: inline-block; margin-right: 3px; animation: pipDot 1.4s infinite ease-in-out both; }
-        .pip-tdot:nth-child(1) { animation-delay: -0.32s; }
-        .pip-tdot:nth-child(2) { animation-delay: -0.16s; }
-        @keyframes pipDot { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-        /* Read-aloud toggle — mirrors the main tab's voice switch so the
-           pop-out can mute/unmute Randy's spoken answers. */
-        .pip-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 12px; background: #fff; border-top: 1px solid var(--divider); flex-shrink: 0; }
-        .pip-speak { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: #6B7693; cursor: pointer; user-select: none; transition: color 0.15s; }
-        .pip-speak:hover { color: var(--navy); }
-        .pip-speak.on { color: var(--primary); }
-        .pip-speak svg { width: 15px; height: 15px; flex-shrink: 0; }
-        .pip-speak .pip-ic-on { display: none; }
-        .pip-speak.on .pip-ic-on { display: inline-block; }
-        .pip-speak.on .pip-ic-off { display: none; }
-        .pip-switch { position: relative; display: inline-flex; width: 38px; height: 21px; border-radius: 999px; background: #C3CBDC; cursor: pointer; transition: background 0.2s; flex-shrink: 0; }
-        .pip-switch:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(3,114,255,0.28); }
-        .pip-switch.on { background: var(--primary); }
-        .pip-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: left 0.2s; box-shadow: 0 1px 3px rgba(22,31,91,0.25); }
-        .pip-switch.on::after { left: 19px; }
-        .pip-newchat-row { display: flex; padding: 0 12px 9px; background: #fff; flex-shrink: 0; }
-        .pip-newchat { display: inline-flex; align-items: center; justify-content: center; gap: 7px; width: 100%; padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--navy); background: #fff; border: 1.5px solid var(--divider); border-radius: 9px; cursor: pointer; font-family: inherit; transition: border-color 0.15s, color 0.15s, background 0.15s; }
-        .pip-newchat:hover { border-color: var(--primary); color: var(--primary); background: #F5F9FF; }
-        .pip-newchat svg { width: 15px; height: 15px; flex-shrink: 0; }
-        .pip-inputrow { display: flex; gap: 8px; align-items: center; padding: 10px; border-top: 1px solid var(--divider); background: #fff; flex-shrink: 0; }
-        .pip-inputrow input { flex: 1; min-width: 0; border: 1.5px solid var(--divider); border-radius: 9999px; padding: 9px 14px; font-size: 13px; outline: none; color: var(--navy); font-family: inherit; }
-        .pip-inputrow input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0,191,255,0.16); }
-        .pip-send { width: 38px; height: 38px; border-radius: 50%; background: var(--primary); color: #fff; border: none; display: grid; place-items: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
-        .pip-send:hover { background: var(--primary-hover); }
-        .pip-send:disabled { background: #cbd5e1; cursor: not-allowed; }
-        .pip-mic { width: 38px; height: 38px; border-radius: 50%; background: #fff; color: var(--primary); border: 1.5px solid var(--divider); display: grid; place-items: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s, border-color 0.15s; }
-        .pip-mic:hover { border-color: var(--primary); background: #F5F9FF; }
-        .pip-mic svg { width: 17px; height: 17px; }
-        .pip-mic .pip-mic-live { display: none; }
-        .pip-mic:disabled { opacity: 0.45; cursor: not-allowed; }
-        .pip-mic.recording { background: #EF4444; border-color: #EF4444; color: #fff; animation: pipMicPulse 1.5s ease-in-out infinite; }
-        .pip-mic.recording:hover { background: #DC2626; border-color: #DC2626; }
-        .pip-mic.recording .pip-mic-idle { display: none; }
-        .pip-mic.recording .pip-mic-live { display: block; }
-        @keyframes pipMicPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.45); } 50% { box-shadow: 0 0 0 6px rgba(239,68,68,0); } }
-        @media (prefers-reduced-motion: reduce) { .pip-dot.live, .pip-mini-dot.live, .pip-mini.is-live .pip-mini-ring, .pip-mini.has-unseen .pip-mini-orb, .pip-mini-dots i, .pip-new, .pip-tdot, .pip-live-wave i, .pip-live-dots i, .pip-live-caret, .pip-mic.recording { animation: none; } }
-      `;
-
-      // Toggle the floating window. Must run from a real user click —
-      // requestWindow() requires a user gesture.
-      async function togglePipWindow(idx) {
-        if (!PIP.supported) return;
-        if (PIP.window) { try { PIP.window.close(); } catch {} return; } // pagehide does the cleanup
-        if (PIP.opening) return;
-        PIP.opening = true;
-        try {
-          // preferInitialWindowPlacement: always dock at Chrome's default
-          // spot (bottom-right of the screen) instead of wherever a past
-          // PiP window was left.
-          const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 380, height: 560, preferInitialWindowPlacement: true });
-          PIP.window = pipWindow;
-          PIP.slotIdx = idx;
-          PIP.collapsed = false;
-          PIP.restoreSize = null;
-          PIP.unseen = 0;
-          PIP.flashNext = false;
-          PIP.flashNow = false;
-          setupPipWindow(pipWindow);
-          showToast('Chat popped out — it stays on top while you work');
-          render();
-        } catch (err) {
-          console.warn('Pop-out window failed:', err);
-          showToast("Couldn't open the pop-out window");
-        } finally {
-          PIP.opening = false;
-        }
-      }
-
-      // One-time scaffold of a PiP document: stylesheet, static skeleton
-      // (header / message list / composer / collapsed icon) and its own
-      // event listeners. Both modes get the full skeleton — `collapsed`
-      // just decides which half shows, so renderPip() works unchanged on
-      // either window. renderPip() only ever rewrites #pip-msgs and the
-      // status bits — the input element is never rebuilt, so its text and
-      // focus survive re-renders (the PiP-side answer to
-      // isComposerFocused()).
-      function setupPipWindow(w, { collapsed = false } = {}) {
-        const doc = w.document;
-        const slot = STATE.slots[PIP.slotIdx];
-        const label = slot ? slot.label : 'Randy';
-        doc.title = label + ' — pop-out chat';
-
-        // The PiP document doesn't inherit page resources: bring the brand
-        // font along, then the self-contained styles.
-        const font = document.querySelector('link[rel="stylesheet"][href*="fonts.googleapis.com"]');
-        if (font) {
-          const l = doc.createElement('link');
-          l.rel = 'stylesheet';
-          l.href = font.href;
-          doc.head.appendChild(l);
-        }
-        const style = doc.createElement('style');
-        style.textContent = PIP_CSS;
-        doc.head.appendChild(style);
-
-        doc.body.innerHTML = `
-          <div class="pip-head">
-            <div class="pip-avatar">${escHtml(label.charAt(0))}<span class="pip-dot" id="pip-dot"></span></div>
-            <div class="pip-titles">
-              <div class="pip-name">${escHtml(label)}</div>
-              <div class="pip-sub" id="pip-sub">Online</div>
-            </div>
-            <button class="pip-min" data-action="pip-minimize" title="Minimize to a floating icon" aria-label="Minimize to a floating icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>
-            </button>
-          </div>
-          <div class="pip-live" id="pip-live">
-            <span class="pip-live-ind" aria-hidden="true">
-              <span class="pip-live-wave"><i></i><i></i><i></i></span>
-              <span class="pip-live-dots"><i></i><i></i><i></i></span>
-            </span>
-            <div class="pip-live-body">
-              <div class="pip-live-label" id="pip-live-label">Listening for technical questions</div>
-              <div class="pip-live-text" id="pip-live-text"></div>
-            </div>
-          </div>
-          <div class="pip-msgs" id="pip-msgs"></div>
-          <div class="pip-toolbar">
-            <label class="pip-speak" id="pip-speak" data-action="pip-toggle-speak" title="Read each answer aloud">
-              <svg class="pip-ic-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3l3.8 3.8a.7.7 0 0 0 1.2-.5Z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.4 5.6a10 10 0 0 1 0 12.8"/></svg>
-              <svg class="pip-ic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3l3.8 3.8a.7.7 0 0 0 1.2-.5Z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>
-              <span>Read aloud</span>
-            </label>
-            <span class="pip-switch" id="pip-switch" role="switch" aria-checked="false" aria-label="Read answers aloud" tabindex="0" data-action="pip-toggle-speak"></span>
-          </div>
-          <div class="pip-newchat-row">
-            <button class="pip-newchat" id="pip-newchat" data-action="pip-new-chat" title="Start a new chat — the current one is saved in History">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-              <span>New chat</span>
-            </button>
-          </div>
-          <div class="pip-inputrow">
-            <input type="text" id="pip-input" placeholder="Message ${escAttr(label)}…" autocomplete="off" />
-            <button class="pip-send" id="pip-send" data-action="pip-send" title="Send message" aria-label="Send message">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
-            </button>
-            <button class="pip-mic" id="pip-mic" data-action="pip-dictate" title="Dictate your message — voice to text" aria-label="Dictate your message" aria-pressed="false"${VOICE.srSupported ? '' : ' disabled'}>
-              <svg class="pip-mic-idle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
-              <svg class="pip-mic-live" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
-            </button>
-          </div>
-          <button class="pip-mini" id="pip-mini" data-action="pip-expand" title="Randy is listening — click to open the chat" aria-label="Open the chat">
-            <span class="pip-mini-stage">
-              <span class="pip-mini-ring"></span>
-              <span class="pip-mini-orb">
-                <span class="pip-mini-letter">${escHtml(label.charAt(0))}</span>
-                <span class="pip-mini-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-                <span class="pip-mini-dot" id="pip-mini-dot"></span>
-                <span class="pip-mini-badge" id="pip-mini-badge">1</span>
-              </span>
-            </span>
-            <span class="pip-mini-label" id="pip-mini-label">Listening…</span>
-          </button>`;
-
-        // The main page's delegated listeners are bound to the MAIN document
-        // and never fire here — the PiP document needs its own.
-        doc.addEventListener('click', e => {
-          if (!e.target.closest) return;
-          if (e.target.closest('[data-action="pip-send"]')) { sendFromPip(); return; }
-          if (e.target.closest('[data-action="pip-dictate"]')) { toggleDictation(); return; }
-          if (e.target.closest('[data-action="pip-minimize"]')) { collapsePip(); return; }
-          if (e.target.closest('[data-action="pip-expand"]')) { expandPip(); return; }
-          if (e.target.closest('[data-action="pip-toggle-speak"]')) { toggleSpeakFromPip(); return; }
-          if (e.target.closest('[data-action="pip-new-chat"]')) { newChat(); return; }
-          const cp = e.target.closest('[data-action="pip-copy"]');
-          if (cp) copyFromPip(cp);
-        });
-        doc.addEventListener('keydown', e => {
-          if (e.key === 'Enter' && !e.shiftKey && e.target && e.target.id === 'pip-input') {
-            e.preventDefault();
-            sendFromPip();
-            return;
-          }
-          if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.id === 'pip-switch') {
-            e.preventDefault();
-            toggleSpeakFromPip();
-          }
-        });
-        w.addEventListener('pagehide', () => {
-          if (PIP.swapping) return; // window replaced by a swap, not closed
-          if (VOICE.dictating) stopDictation(); // free the mic, resume Randy
-          if (PIP.window === w) {
-            PIP.window = null;
-            PIP.slotIdx = null;
-            PIP.lastHtml = '';
-            PIP.collapsed = false;
-            PIP.restoreSize = null;
-            PIP.unseen = 0;
-            PIP.flashNext = false;
-            PIP.flashNow = false;
-            render(); // put the pop-out buttons back in their closed state
-          }
-        });
-
-        if (collapsed) doc.body.classList.add('pip-collapsed');
-        PIP.lastHtml = '';
-        renderPip();
-        if (!collapsed) setTimeout(() => { try { doc.getElementById('pip-input').focus(); } catch {} }, 50);
-      }
-
-      // Mute / unmute Randy's spoken answers from the pop-out. Shares the
-      // same slot.speakAnswers flag as the main tab's switch, so toggling
-      // here and there stays in sync; render() refreshes both views.
-      function toggleSpeakFromPip() {
-        const slot = STATE.slots[PIP.slotIdx];
-        if (!slot) return;
-        slot.speakAnswers = !slot.speakAnswers;
-        saveSettings();
-        if (!slot.speakAnswers && slot.isSpeaking) stopSpeaking();
-        render();
-      }
-
-      function sendFromPip() {
-        const w = PIP.window;
-        if (!w || w.closed) return;
-        const slot = STATE.slots[PIP.slotIdx];
-        const input = w.document.getElementById('pip-input');
-        if (!slot || !input) return;
-        const text = input.value.trim();
-        if (!text || slot.loading) return;
-        // Sending ends dictation — clear the staged text first so the
-        // recognizer's trailing onend can't repaint the just-cleared input.
-        if (VOICE.dictating) { VOICE.dictationBase = ''; stopDictation(); }
-        slot.inputText = text;
-        input.value = '';
-        sendMessage(PIP.slotIdx); // its render() syncs the pop-out too
-      }
-
-      // Copy an assist answer from the pop-out. Goes through the PiP
-      // window's OWN clipboard: the async Clipboard API rejects when the
-      // calling document isn't focused, and during this click the focused
-      // document is the pop-out, not the main page. Plain text, same as
-      // the main app's copy-msg, so it pastes cleanly into chat/email.
-      function copyFromPip(btn) {
-        const w = PIP.window;
-        if (!w || w.closed) return;
-        const slot = STATE.slots[PIP.slotIdx];
-        const m = slot && slot.messages[parseInt(btn.dataset.msg, 10)];
-        if (!m || !m.content) return;
-        const text = stripMarkdown(m.content);
-        const done = () => {
-          btn.classList.add('copied');
-          setTimeout(() => { try { btn.classList.remove('copied'); } catch {} }, 1200);
-        };
-        const fallback = () => {
-          try {
-            const d = w.document;
-            const ta = d.createElement('textarea');
-            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-            d.body.appendChild(ta); ta.select();
-            d.execCommand('copy'); d.body.removeChild(ta);
-            done();
-          } catch {}
-        };
-        if (w.navigator.clipboard && w.navigator.clipboard.writeText) {
-          w.navigator.clipboard.writeText(text).then(done).catch(fallback);
-        } else fallback();
-      }
-
-      // True when the main window holds transient user activation — clicks
-      // inside the PiP window propagate it here, which is exactly what
-      // requestWindow() and resizeTo() need.
-      function canSwapPipWindow() {
-        return !!(navigator.userActivation && navigator.userActivation.isActive);
-      }
-
-      // PiP windows can't be moved programmatically, so changing where one
-      // sits means replacing it: request a fresh window with
-      // preferInitialWindowPlacement and Chrome docks it at its default
-      // spot — the bottom-right corner of the screen. Chrome closes the
-      // old window itself (one PiP window at a time); the swapping flag
-      // keeps that pagehide from being mistaken for the user closing it.
-      async function swapPipWindow({ width, height }) {
-        const old = PIP.window;
-        PIP.swapping = true;
-        try {
-          const next = await window.documentPictureInPicture.requestWindow({
-            width, height, preferInitialWindowPlacement: true
-          });
-          if (old && old !== next) { try { old.close(); } catch {} }
-          PIP.window = next;
-          PIP.lastHtml = '';
-          return next;
-        } finally {
-          PIP.swapping = false;
-        }
-      }
-
-      // Minimize the pop-out down to the small "R" icon, docked at the
-      // bottom-right of the screen, that keeps listening (green dot =
-      // voice on, same as everywhere else). Without activation to swap
-      // windows, shrink the current one where it sits instead.
-      async function collapsePip() {
-        const w = PIP.window;
-        if (!w || w.closed || PIP.collapsed || PIP.swapping) return;
-        if (VOICE.dictating) stopDictation(); // the input is hidden while collapsed
-        PIP.collapsed = true;
-        PIP.unseen = 0;
-        PIP.flashNext = false;
-        PIP.flashNow = false;
-        PIP.restoreSize = {
-          width: w.innerWidth > 0 ? w.innerWidth : 380,
-          height: w.innerHeight > 0 ? w.innerHeight : 560,
-          outerWidth: w.outerWidth || 0,
-          outerHeight: w.outerHeight || 0
-        };
-        if (canSwapPipWindow()) {
-          try {
-            const mini = await swapPipWindow({ width: 240, height: 130 });
-            setupPipWindow(mini, { collapsed: true });
-            return;
-          } catch (err) {
-            console.warn('PiP swap to icon failed, resizing in place:', err);
-          }
-        }
-        try { w.document.body.classList.add('pip-collapsed'); } catch {}
-        try { w.resizeTo(240, 152); } catch (err) { console.warn('PiP collapse resize failed:', err); }
-        renderPip();
-      }
-
-      // Post-expand touches shared by both expand paths: land on the
-      // newest answer, highlight it (the typing indicator doesn't count),
-      // and only refocus the input on a deliberate click — never steal OS
-      // focus while the user is mid-call in another app.
-      function finishPipExpand(w, { auto, hadUnseen }) {
-        try {
-          const doc = w.document;
-          const msgs = doc.getElementById('pip-msgs');
-          if (msgs) msgs.scrollTop = msgs.scrollHeight;
-          if (auto || hadUnseen) {
-            const bots = doc.querySelectorAll('.pip-bubble.pip-bot:not(.pip-typing)');
-            if (bots.length) bots[bots.length - 1].classList.add('pip-new');
-            // Auto-expanded for a question that's still being answered —
-            // there's no answer bubble to highlight yet; flag the reply so
-            // it flashes the moment it lands.
-            else if (auto) PIP.flashNext = true;
-          }
-          if (!auto) setTimeout(() => { try { doc.getElementById('pip-input').focus(); } catch {} }, 50);
-        } catch {}
-      }
-
-      // Bring the full chat back at its previous size. Manual path = a
-      // click inside the PiP window, which propagates the activation the
-      // window swap needs. The auto path (a question just came in) has no
-      // gesture; Chrome refuses the swap, we stay collapsed, and the icon
-      // flips to its thinking / answer-ready state instead — returns false
-      // so callers know the chat didn't come back.
-      async function expandPip({ auto = false } = {}) {
-        const w = PIP.window;
-        if (!w || w.closed || !PIP.collapsed || PIP.swapping) return false;
-        const size = PIP.restoreSize || { width: 380, height: 560 };
-        const hadUnseen = PIP.unseen > 0;
-        if (canSwapPipWindow()) {
-          try {
-            const big = await swapPipWindow({ width: size.width, height: size.height });
-            PIP.collapsed = false;
-            PIP.unseen = 0;
-            PIP.restoreSize = null;
-            setupPipWindow(big, { collapsed: false });
-            finishPipExpand(big, { auto, hadUnseen });
-            return true;
-          } catch (err) {
-            if (auto) return false;
-            console.warn('PiP swap to chat failed, expanding in place:', err);
-          }
-        } else if (auto) {
-          return false;
-        }
-        // In-place fallback (manual click without a usable swap): grow the
-        // current window where it sits rather than leaving the user stuck.
-        PIP.collapsed = false;
-        PIP.unseen = 0;
-        PIP.restoreSize = null;
-        try { w.document.body.classList.remove('pip-collapsed'); } catch {}
-        try { w.resizeTo(size.outerWidth || size.width, size.outerHeight || size.height); }
-        catch (err) { console.warn('PiP expand resize failed:', err); }
-        renderPip();
-        finishPipExpand(w, { auto: false, hadUnseen });
-        return true;
-      }
-
-      // A question just came in — pop the collapsed icon back out so the
-      // answer lands in view. If Chrome refuses the gesture-less swap,
-      // renderPip() shows the thinking state on the icon instead.
-      function pipAutoExpand() {
-        if (!PIP.window || PIP.window.closed || !PIP.collapsed) return;
-        expandPip({ auto: true });
-      }
-
-      // An answer just finished. Collapsed: try once more to pop out with
-      // the result, badge the icon if that's refused. Expanded because of
-      // an earlier auto-expand: highlight the reply when the message list
-      // next rebuilds (the render that paints it).
-      async function notePipAnswerArrived() {
-        const w = PIP.window;
-        if (!w || w.closed) return;
-        if (PIP.collapsed) {
-          const expanded = await expandPip({ auto: true });
-          if (!expanded && PIP.collapsed) {
-            PIP.unseen++;
-            renderPip();
-          }
-          return;
-        }
-        if (PIP.flashNext) { PIP.flashNext = false; PIP.flashNow = true; }
-      }
-
-      // Live listening band, mirroring the main tab's transcript strip:
-      // stream the voice-to-text while Randy hears speech, then flip to a
-      // busy "Processing/Researching" state the moment a question is being
-      // checked or answered. Hidden whenever Randy isn't actively listening,
-      // so typed-only use of the pop-out is unaffected.
-      // The live band walks the question through three stages so the user can
-      // watch Randy work: (1) listening — the voice-to-text streams in;
-      // (2) analyzing — the classifier is deciding if it's a tech question;
-      // (3) researching — the support-site web search is running for the answer.
-      function pipLiveModel(slot) {
-        if (!slot || !slot.listenOn) return { show: false };
-        // Stage 3 — answering. The web search runs here. An overheard question
-        // is a technical-assist answer ("Researching support site"); a spoken
-        // one is an ordinary chat reply ("Thinking").
-        if (slot.loading) {
-          let lastUser = null;
-          for (let i = slot.messages.length - 1; i >= 0; i--) {
-            if (slot.messages[i].role === 'user') { lastUser = slot.messages[i]; break; }
-          }
-          const researching = lastUser && lastUser.kind === 'assist-q';
-          if (researching) {
-            return { show: true, stage: 'researching', label: 'Researching support site', text: lastUser ? lastUser.content : '' };
-          }
-          return { show: true, stage: 'researching', label: 'Thinking…', text: '' };
-        }
-        // Stage 2 — the classifier is deciding whether the utterance is a
-        // technical question worth answering.
-        if (TECH.pending) {
-          return { show: true, stage: 'analyzing', label: 'Analyzing question', text: TECH.activeText || VOICE.interimText || '' };
-        }
-        // Stage 1 — live transcription as Randy hears the call.
-        return { show: true, stage: 'listening', label: 'Listening for technical questions', text: VOICE.interimText || '' };
-      }
-
-      // Push the live-band state into the pop-out document. Called from
-      // renderPip() (covers status changes) and directly from the interim
-      // transcript hooks (which bypass a full render for performance). Must
-      // never throw — the window can close between checks and DOM writes.
-      function updatePipLive(slot) {
-        const w = PIP.window;
-        if (!w || w.closed || PIP.collapsed) return;
-        try {
-          const doc = w.document;
-          const band = doc.getElementById('pip-live');
-          if (!band) return;
-          const m = pipLiveModel(slot || STATE.slots[PIP.slotIdx]);
-          band.classList.toggle('show', !!m.show);
-          band.classList.toggle('stage-listening', m.stage === 'listening');
-          band.classList.toggle('stage-analyzing', m.stage === 'analyzing');
-          band.classList.toggle('stage-researching', m.stage === 'researching');
-          if (!m.show) return;
-          const lbl = doc.getElementById('pip-live-label');
-          if (lbl && lbl.textContent !== m.label) lbl.textContent = m.label;
-          const txt = doc.getElementById('pip-live-text');
-          if (txt) {
-            // Only the live-transcription stage gets the blinking caret; the
-            // analyzing/researching text is the settled question, shown plainly.
-            const caret = m.stage === 'listening' ? '<span class="pip-live-caret">▊</span>' : '';
-            const html = m.text ? escHtml(m.text) + caret : '';
-            if (txt.innerHTML !== html) txt.innerHTML = html;
-          }
-        } catch (err) {
-          // window vanished mid-write — harmless, next render reconciles.
-        }
-      }
-
-      // Status line + listening dot, mirroring the conv-sub logic in
-      // renderCard so the pop-out reflects the main tab's voice state.
-      function pipStatus(slot) {
-        const on = !!slot.listenOn;
-        if (slot.isSpeaking) return { text: 'Talking…', live: true };
-        if (slot.loading) return { text: 'Thinking…', live: on };
-        if (on) return { text: 'Listening for technical questions', live: true };
-        return { text: 'Online', live: false };
-      }
-
-      function pipMessagesHtml(slot) {
-        const msgs = slot.messages;
-        if (msgs.length === 0 && !slot.loading) {
-          if (slot.listenOn) {
-            return '<div class="pip-empty">Listening to the call — technical questions get answered here as Randy hears them.</div>';
-          }
-          return '<div class="pip-empty">No messages yet — turn ' + escHtml(slot.voiceName || slot.label) + ' on in the main tab to listen to your call, or type below.</div>';
-        }
-        const out = msgs.map((m, mi) => {
-          if (m.role === 'user') {
-            const badge = m.kind === 'assist-q' ? '<span class="pip-badge">Overheard</span>' : '';
-            return '<div class="pip-row user"><div class="pip-bubble pip-user">' + badge + escHtml(m.content) + '</div></div>';
-          }
-          if (!m.content) return ''; // in-flight placeholder — the typing dots cover it
-          // Same single render path as the main chat: every answer gets markdown
-          // + source chips; the "Technical assist" badge marks overheard ones.
-          const srcs = Array.isArray(m.sources) ? m.sources : [];
-          const badge = m.kind === 'assist' ? '<span class="pip-badge assist">Technical assist</span>' : '';
-          return '<div class="pip-row"><div class="pip-bubble pip-bot pip-md">' +
-            '<button class="pip-copy" data-action="pip-copy" data-msg="' + mi + '" title="Copy answer" aria-label="Copy answer">' +
-              '<svg class="ic-copy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>' +
-              '<svg class="ic-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>' +
-            '</button>' +
-            badge +
-            mdToHtml(m.content) +
-            (srcs.length ? '<div class="pip-src">' + srcs.map(u =>
-              '<a href="' + escAttr(safeHref(u)) + '" target="_blank" rel="noopener noreferrer" title="' + escAttr(u) + '">' + escHtml(sourceLabelOf(u)) + '</a>').join('') + '</div>' : '') +
-            '</div></div>';
-        });
-        if (slot.loading) {
-          out.push('<div class="pip-row"><div class="pip-bubble pip-bot pip-typing"><span class="pip-tdot"></span><span class="pip-tdot"></span><span class="pip-tdot"></span></div></div>');
-        }
-        return out.join('');
-      }
-
-      // Refresh the pop-out from STATE. Runs at the end of every render()
-      // while the window is open, which is what makes voice answers landing
-      // in the main tab appear here in real time. Must never throw — the
-      // window can vanish between the .closed check and the DOM writes, and
-      // a PiP hiccup must not break the main render cycle.
-      function renderPip() {
-        const w = PIP.window;
-        if (!w || w.closed) return;
-        const slot = STATE.slots[PIP.slotIdx];
-        if (!slot) return;
-        try {
-          const doc = w.document;
-          const msgs = doc.getElementById('pip-msgs');
-          if (!msgs) return;
-
-          const st = pipStatus(slot);
-          const sub = doc.getElementById('pip-sub');
-          if (sub && sub.textContent !== st.text) sub.textContent = st.text;
-          const dot = doc.getElementById('pip-dot');
-          if (dot) dot.className = 'pip-dot' + (st.live ? ' live' : '');
-
-          // Live transcript / processing band.
-          updatePipLive(slot);
-
-          // Read-aloud switch — keep in sync with slot.speakAnswers (it can
-          // also be toggled from the main tab).
-          const speakOn = !!slot.speakAnswers;
-          const speakLbl = doc.getElementById('pip-speak');
-          if (speakLbl) {
-            speakLbl.classList.toggle('on', speakOn);
-            const t = speakOn ? 'Randy reads each answer aloud — click to mute' : 'Answers stay silent — click to have Randy read them aloud';
-            if (speakLbl.title !== t) speakLbl.title = t;
-          }
-          const speakSw = doc.getElementById('pip-switch');
-          if (speakSw) {
-            speakSw.classList.toggle('on', speakOn);
-            speakSw.setAttribute('aria-checked', speakOn ? 'true' : 'false');
-          }
-
-          // Collapsed icon: listening → answering → answer-ready.
-          const mini = doc.getElementById('pip-mini');
-          if (mini) {
-            const thinking = !!slot.loading;
-            const unseen = !thinking && PIP.unseen > 0;
-            mini.classList.toggle('is-live', st.live);
-            mini.classList.toggle('is-thinking', thinking);
-            mini.classList.toggle('has-unseen', unseen);
-            const miniDot = doc.getElementById('pip-mini-dot');
-            if (miniDot) miniDot.className = 'pip-mini-dot' + (st.live ? ' live' : '');
-            const badge = doc.getElementById('pip-mini-badge');
-            if (badge) badge.textContent = PIP.unseen > 9 ? '9+' : String(PIP.unseen || 1);
-            const lbl = doc.getElementById('pip-mini-label');
-            const lblText = thinking ? 'Answering…'
-              : unseen ? (PIP.unseen === 1 ? 'Answer ready' : PIP.unseen + ' answers ready')
-              : st.live ? 'Listening…' : 'Online';
-            if (lbl && lbl.textContent !== lblText) lbl.textContent = lblText;
-            const t = thinking ? 'Randy is answering — click to open the chat'
-              : unseen ? 'Answer ready — click to view it'
-              : st.live ? 'Randy is listening — click to open the chat'
-              : 'Click to open the chat';
-            if (mini.title !== t) mini.title = t;
-          }
-
-          const name = doc.querySelector('.pip-name');
-          if (name && name.textContent !== slot.label) {
-            name.textContent = slot.label;
-            doc.title = slot.label + ' — pop-out chat';
-          }
-
-          // Skip no-op rebuilds (toasts and interim updates re-render the
-          // main app constantly) so text selection in the pop-out survives.
-          const html = pipMessagesHtml(slot);
-          if (PIP.lastHtml !== html) {
-            const atBottom = msgs.scrollTop + msgs.clientHeight >= msgs.scrollHeight - 48;
-            msgs.innerHTML = html;
-            PIP.lastHtml = html;
-            if (atBottom) msgs.scrollTop = msgs.scrollHeight;
-            if (PIP.flashNow) {
-              PIP.flashNow = false;
-              const bots = msgs.querySelectorAll('.pip-bubble.pip-bot:not(.pip-typing)');
-              if (bots.length) bots[bots.length - 1].classList.add('pip-new');
-            }
-          }
-
-          const sendBtn = doc.getElementById('pip-send');
-          if (sendBtn && sendBtn.disabled !== !!slot.loading) sendBtn.disabled = !!slot.loading;
-
-          // Dictation mic — reflect the live recording state.
-          const micBtn = doc.getElementById('pip-mic');
-          if (micBtn) {
-            micBtn.classList.toggle('recording', !!VOICE.dictating);
-            micBtn.setAttribute('aria-pressed', VOICE.dictating ? 'true' : 'false');
-            if (micBtn.disabled !== !VOICE.srSupported) micBtn.disabled = !VOICE.srSupported;
-            const t = VOICE.dictating ? 'Stop dictation' : 'Dictate your message — voice to text';
-            if (micBtn.title !== t) micBtn.title = t;
-          }
-        } catch (err) {
-          console.warn('renderPip failed:', err);
-        }
       }
 
       /* ================================================================
@@ -5663,25 +3134,12 @@
         _bound = true;
 
         // The microphone picker in Settings. Changing it re-opens the held
-        // capture on the chosen device right away (no need to toggle Randy off
-        // and on). The screen-share picker is NOT re-triggered — only the mic
-        // stream is swapped — so two-way users aren't re-prompted.
+        // capture on the chosen device right away (no need to toggle listening
+        // off and on). The screen-share picker is NOT re-triggered — only the
+        // mic stream is swapped — so two-way users aren't re-prompted.
         document.addEventListener('change', e => {
           const el = e.target;
-          if (!el) return;
-
-          // The speaking-voice picker. '' = automatic. Changing it re-renders
-          // Settings so the "(currently …)" hint and selection stay accurate;
-          // the next spoken sentence uses the new voice via resolveVoice().
-          if (el.id === 'setting-voice-list') {
-            TTS.chosenName = el.value || '';
-            saveSettings();
-            showToast(TTS.chosenName ? 'Voice set to ' + TTS.chosenName : 'Using the automatic voice');
-            render();
-            return;
-          }
-
-          if (el.id !== 'setting-mic') return;
+          if (!el || el.id !== 'setting-mic') return;
           MIC.deviceId = el.value || '';
           saveSettings();
           if (STATE.slots[0].listenOn) {
@@ -5700,17 +3158,11 @@
 
         document.addEventListener('click', e => {
           const act = e.target.closest('[data-action]');
-          // Close the card overflow menu when clicking outside it.
-          if (!act && STATE.cardMenuOpen && !e.target.closest('[data-menu="card"]')) {
-            STATE.cardMenuOpen = false;
-            render();
-            return;
-          }
           // Cancel the inline delete-confirm when clicking elsewhere.
           if (STATE.historyConfirmDeleteId) {
             const insidePanel = !!e.target.closest('.history-panel-open');
             const insidePopout = !!HISTORY_VIEW.open && !!e.target.closest('.history-popout');
-            const protect = act && /^(confirm-delete-history|cancel-delete-history|confirm-delete-history-yes|confirm-delete-history-popout|copy-answer|load-history|noop)$/.test(act.dataset.action);
+            const protect = act && /^(confirm-delete-history|cancel-delete-history|confirm-delete-history-yes|confirm-delete-history-popout|copy-answer|noop)$/.test(act.dataset.action);
             if ((!insidePanel && !insidePopout) || (act && !protect)) {
               STATE.historyConfirmDeleteId = null;
               if (!act) { render(); return; }
@@ -5719,8 +3171,6 @@
           if (!act) return;
           const action = act.dataset.action;
           const idx = act.dataset.idx !== undefined ? parseInt(act.dataset.idx) : null;
-
-          if (STATE.cardMenuOpen && action !== 'toggle-card-menu') STATE.cardMenuOpen = false;
 
           switch (action) {
             case 'save-onboarding': {
@@ -5787,44 +3237,6 @@
               if (si) si.focus();
               break;
             }
-            case 'toggle-composer': {
-              const cur = document.getElementById('home-input-' + (idx !== null ? idx : 0));
-              if (cur && STATE.slots[idx !== null ? idx : 0]) STATE.slots[idx !== null ? idx : 0].inputText = cur.value;
-              STATE.composerExpanded = !STATE.composerExpanded;
-              render();
-              setTimeout(() => {
-                const inp = document.getElementById('home-input-' + (idx !== null ? idx : 0));
-                if (inp) { inp.focus(); const len = inp.value.length; try { inp.setSelectionRange(len, len); } catch {} }
-              }, 40);
-              break;
-            }
-            case 'toggle-card-menu': STATE.cardMenuOpen = !STATE.cardMenuOpen; render(); break;
-            case 'pop-out-chat': togglePipWindow(idx !== null ? idx : 0); break;
-            case 'expand-slot': STATE.expandedSlot = idx; render(); scrollChat(); setTimeout(()=>document.getElementById('expanded-input')?.focus(),100); break;
-            case 'close-expanded': STATE.expandedSlot = null; render(); break;
-            case 'clear-chat': clearChat(idx !== null ? idx : 0); break;
-            case 'send-expanded': {
-              const inp = document.getElementById('expanded-input');
-              if (inp) STATE.slots[STATE.expandedSlot].inputText = inp.value;
-              sendMessage(STATE.expandedSlot);
-              break;
-            }
-            case 'send-home': {
-              const inp = document.getElementById('home-input-' + idx);
-              if (inp) STATE.slots[idx].inputText = inp.value;
-              sendMessage(idx);
-              break;
-            }
-            case 'dictate-home': {
-              const di = idx !== null ? idx : 0;
-              // Persist whatever's typed so dictation appends to it (and a
-              // re-render from the toggle keeps it).
-              const cur = document.getElementById('home-input-' + di);
-              if (cur && STATE.slots[di]) STATE.slots[di].inputText = cur.value;
-              toggleDictation({ kind: 'home', slot: di });
-              break;
-            }
-            case 'ask-selection': toggleSelectionCapture(idx !== null ? idx : 0); break;
             case 'toggle-listen': toggleListening(); break;
             case 'pick-audio-mode': {
               const m = act.dataset.mode === 'two-way' ? 'two-way' : 'one-way';
@@ -5892,59 +3304,67 @@
             }
             case 'close-audio-chooser':
             case 'close-audio-chooser-bg': {
-              // Background only closes on a direct click (mirrors the history
-              // popout): a click on the modal's own content has no data-action.
+              // Background only closes on a direct click: a click on the
+              // modal's own content has no data-action.
               if (action === 'close-audio-chooser-bg' && !e.target.hasAttribute('data-action')) break;
               closeAudioChooser();
               break;
             }
-            case 'new-chat': HISTORY_VIEW.open = null; STATE.activeTab = 'home'; newChat(); break;
-            case 'toggle-speak-answers': {
-              const s = STATE.slots[0];
-              s.speakAnswers = !s.speakAnswers;
-              saveSettings();
-              showToast(s.speakAnswers ? 'Randy will read answers out loud' : 'Answers will show in the chat only');
-              if (!s.speakAnswers && s.isSpeaking) stopSpeaking();
+
+            /* ---- checklist actions ---- */
+            case 'add-check-item': {
+              const inp = document.getElementById('ck-new-input');
+              const text = (inp ? inp.value : STATE.newItemText).trim();
+              if (!text) break;
+              addChecklistItem(text);
+              STATE.newItemText = '';
+              render();
+              focusAfterRender('#ck-new-input');
+              break;
+            }
+            case 'toggle-check-item': toggleChecklistItem(act.dataset.id); break;
+            case 'edit-check-item': {
+              const it = CHECKLIST.items.find(x => x.id === act.dataset.id);
+              if (!it) break;
+              STATE.editingItemId = it.id;
+              STATE.editItemText = it.text;
+              render();
+              focusAfterRender('#ck-edit-input');
+              break;
+            }
+            case 'save-edit-item': {
+              const inp = document.getElementById('ck-edit-input');
+              const text = (inp ? inp.value : STATE.editItemText).trim();
+              if (text) updateChecklistItemText(act.dataset.id, text);
+              STATE.editingItemId = null;
+              STATE.editItemText = '';
               render();
               break;
             }
-            case 'stop-speaking': stopSpeaking(); break;
-            case 'cancel-reply': abortActiveReply(); render(); break;
-            case 'force-answer': {
-              const q = act.dataset.text || '';
-              if (q.trim()) {
-                // Clear the near-miss flag so the chip doesn't linger after tap.
-                TECH.decisions.forEach(d => { if (d.text === q) d.nearMiss = false; });
-                TECH.lastSubmitted = q;
-                TECH.lastSubmittedAt = Date.now();
-                runAssistAnswer(0, q);
-              }
+            case 'cancel-edit-item': {
+              STATE.editingItemId = null;
+              STATE.editItemText = '';
+              render();
               break;
             }
-            case 'tts-speak': {
-              const si = parseInt(act.dataset.slot, 10);
-              const mi = parseInt(act.dataset.msg, 10);
-              const sl = STATE.slots[si];
-              if (!sl) break;
-              if (VOICE.playingMsg && VOICE.playingMsg.slot === si && VOICE.playingMsg.msg === mi) {
-                stopSpeaking();
-                break;
-              }
-              if (sl.isSpeaking) stopSpeaking();
-              const msg = sl.messages[mi];
-              if (!msg || msg.role !== 'assistant') break;
-              // Every answer now carries a spoken summary (voice and typed
-              // alike); fall back to a generated summary only for older
-              // messages that predate it.
-              const speech = msg.spoken || extractSummary(stripMarkdown(msg.content));
-              speakText(speech, si, mi);
+            case 'delete-check-item': {
+              if (STATE.editingItemId === act.dataset.id) { STATE.editingItemId = null; STATE.editItemText = ''; }
+              removeChecklistItem(act.dataset.id);
               break;
             }
-            case 'preview-voice': {
-              if (STATE.activeTab === 'settings') readFields();
-              speakText("Hey, it's Randy. This is how I'll sound when I answer out loud.", idx !== null ? idx : 0);
+            case 'move-check-item': moveChecklistItem(act.dataset.id, parseInt(act.dataset.dir, 10) || 0); break;
+            case 'reset-checklist': resetChecklist(); break;
+            case 'apply-default-checklist': {
+              // Capture any unsaved edits in the default-list textarea first,
+              // then swap the current checklist for the default (all unchecked).
+              readFields();
+              saveSettings();
+              applyDefaultChecklist();
+              showToast('Checklist replaced with your saved default');
+              render();
               break;
             }
+
             case 'save-settings': {
               readFields();
               saveSettings();
@@ -5998,64 +3418,28 @@
               copyTextToClipboard(h.pairs[pi].answer || '', act);
               break;
             }
-            case 'copy-msg': {
-              const slot = STATE.slots[parseInt(act.dataset.slot, 10)];
-              const m = slot && slot.messages[parseInt(act.dataset.msg, 10)];
-              if (!m || !m.content) break;
-              // Plain text, not markdown source — pastes cleanly into
-              // chat/email mid-call.
-              copyTextToClipboard(stripMarkdown(m.content), act);
-              break;
-            }
             case 'noop': break;
-            case 'load-history': {
-              const hist = STATE.sessionHistory.find(h => h.id === act.dataset.id);
-              if (hist) {
-                const slot = STATE.slots[0];
-                const transcript = hist.pairs.map(p => 'User: ' + p.question + '\nRandy: ' + stripMarkdown(p.answer)).join('\n\n');
-                slot.inputText = 'Here is a previous conversation for context:\n\n' + transcript + '\n\nBased on this conversation, ';
-                HISTORY_VIEW.open = null;
-                STATE.historyOpen = false;
-                STATE.activeTab = 'home';
-                render();
-                scrollChat();
-                setTimeout(() => {
-                  const inp = document.getElementById('home-input-0');
-                  if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
-                }, 150);
-              }
-              break;
-            }
             case 'reset-slot': {
               const s = STATE.slots[idx !== null ? idx : 0];
-              s.prompt = RANDY_PERSONA;
-              s.label = 'Randy';
-              s.voiceName = 'Randy';
-              s.voicePersonality = DEFAULT_VOICE_PERSONALITY;
-              s.allowedDomains = DEFAULT_RESEARCH_DOMAINS.slice();
+              s.label = 'Sales Assistant';
               saveSettings(); render(); break;
             }
           }
         });
 
-        // Keep STATE in sync with the composer and patch the send button's
+        // Keep STATE in sync with the checklist inputs so background renders
+        // (toasts, live status) never wipe a draft; patch the add button's
         // disabled state live (a re-render per keystroke would steal focus).
         document.addEventListener('input', e => {
-          const syncSendBtn = (sendBtn, slot) => {
-            if (!sendBtn || !slot) return;
-            const shouldDisable = !!slot.loading || !(slot.inputText || '').trim();
-            if (sendBtn.disabled !== shouldDisable) sendBtn.disabled = shouldDisable;
-          };
-          if (e.target.id === 'expanded-input' && STATE.expandedSlot !== null) {
-            const slot = STATE.slots[STATE.expandedSlot];
-            slot.inputText = e.target.value;
-            syncSendBtn(document.querySelector('[data-action="send-expanded"]'), slot);
-          } else if (typeof e.target.id === 'string' && e.target.id.startsWith('home-input-')) {
-            const hi = parseInt(e.target.id.slice('home-input-'.length), 10);
-            if (!Number.isNaN(hi) && STATE.slots[hi]) {
-              STATE.slots[hi].inputText = e.target.value;
-              syncSendBtn(document.querySelector('[data-action="send-home"][data-idx="' + hi + '"]'), STATE.slots[hi]);
+          if (e.target.id === 'ck-new-input') {
+            STATE.newItemText = e.target.value;
+            const btn = document.querySelector('[data-action="add-check-item"]');
+            if (btn) {
+              const dis = !e.target.value.trim();
+              if (btn.disabled !== dis) btn.disabled = dis;
             }
+          } else if (e.target.id === 'ck-edit-input') {
+            STATE.editItemText = e.target.value;
           } else if (e.target.id === 'history-search') {
             // Filter as you type. render() rebuilds the DOM, so put the
             // focus and caret back where they were.
@@ -6074,19 +3458,23 @@
             document.querySelector('[data-action="save-onboarding"]')?.click();
             return;
           }
-          if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'expanded-input' && STATE.expandedSlot !== null) {
+          // Enter in the add box adds the item; Enter in the editor saves it.
+          if (e.key === 'Enter' && e.target.id === 'ck-new-input') {
             e.preventDefault();
-            STATE.slots[STATE.expandedSlot].inputText = e.target.value;
-            sendMessage(STATE.expandedSlot);
+            STATE.newItemText = e.target.value;
+            document.querySelector('[data-action="add-check-item"]')?.click();
             return;
           }
-          if (e.key === 'Enter' && !e.shiftKey && typeof e.target.id === 'string' && e.target.id.startsWith('home-input-')) {
+          if (e.key === 'Enter' && e.target.id === 'ck-edit-input') {
             e.preventDefault();
-            const hi = parseInt(e.target.id.slice('home-input-'.length), 10);
-            if (!Number.isNaN(hi) && STATE.slots[hi]) {
-              STATE.slots[hi].inputText = e.target.value;
-              sendMessage(hi);
-            }
+            STATE.editItemText = e.target.value;
+            document.querySelector('[data-action="save-edit-item"]')?.click();
+            return;
+          }
+          if (e.key === 'Escape' && STATE.editingItemId) {
+            STATE.editingItemId = null;
+            STATE.editItemText = '';
+            render();
             return;
           }
           // Space/Enter activate the toggle switches (they're divs with role=switch).
@@ -6095,7 +3483,7 @@
             e.target.click();
             return;
           }
-          // ...and the div-based buttons (saved-conversation items, history rail).
+          // ...and the div-based buttons (checklist rows, saved-conversation items).
           if ((e.key === 'Enter' || e.key === ' ') && e.target.getAttribute &&
               e.target.getAttribute('role') === 'button' && e.target.dataset && e.target.dataset.action) {
             e.preventDefault();
@@ -6121,15 +3509,11 @@
         const i = STATE.editingSlot;
         const s = STATE.slots[i];
         const l = document.getElementById('setting-label');
-        const p = document.getElementById('setting-prompt');
-        const dm = document.getElementById('setting-domains');
+        const dc = document.getElementById('setting-default-checklist');
         if (l) s.label = l.value.trim() || s.label;
-        if (p) s.prompt = p.value.trim() || s.prompt;
-        // The wake-word field is gone; keep voiceName (the hero/display name)
-        // in sync with the display name so renaming Randy still works.
-        s.voiceName = s.label;
-        if (dm) {
-          s.allowedDomains = dm.value.split('\n').map(x => x.trim()).filter(Boolean);
+        if (dc) {
+          CHECKLIST.defaults = dc.value.split('\n').map(x => x.trim()).filter(Boolean);
+          saveDefaultChecklist();
         }
       }
 
@@ -6145,28 +3529,21 @@
         if (_mainStarted) return;
         _mainStarted = true;
         loadRemoteConfig().then(render);
-        // Re-render once the browser loads its speech voice list (async in Chrome).
-        if (VOICE.ttsSupported && typeof speechSynthesis.onvoiceschanged !== 'undefined') {
-          window.speechSynthesis.onvoiceschanged = () => {
-            if (STATE.activeTab === 'settings') render();
-          };
-        }
         // Auto-launch the mic on open. One-way (mic only) needs no screen-share
-        // prompt, so Randy starts listening the moment the panel opens — the user
+        // prompt, so listening starts the moment the panel opens — the user
         // never picks a mic. Two-way / computer-audio capture stays opt-in from
         // Settings (its share picker needs a click). autoStartListening() retries
         // through the transient capture failures that can happen right as the
-        // panel appears, so Randy reliably comes up listening on every open.
+        // panel appears, so listening reliably comes up on every open.
         if (VOICE.srSupported) {
           setTimeout(() => { try { autoStartListening(); } catch {} }, 250);
         }
-        // Auto-arm highlight capture on open too, so highlighting text on the
-        // page (e.g. while copying something) goes straight to Randy — the
-        // button still lets the user turn it off.
-        setTimeout(() => { try { autoArmSelectionCapture(); } catch {} }, 600);
       }
 
       function boot() {
+        // Load the persisted checklist (and the saved default list) right
+        // away — the panel renders it as soon as chrome.storage answers.
+        loadChecklist().then(() => render());
         // Fast path: a synchronous localStorage hint says this install already
         // finished onboarding, so render the normal tool and start listening
         // IMMEDIATELY — identical to the original boot, with no wait on the async
@@ -6192,7 +3569,7 @@
       // Run boot once the DOM is ready. The script is the last element in the
       // body, so DOMContentLoaded normally hasn't fired yet — but if this ever
       // executes after the DOM is already parsed, addEventListener would never
-      // fire and Randy would never come up. Guard on readyState so boot always
+      // fire and the panel would never come up. Guard on readyState so boot always
       // runs exactly once, on every open.
       if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', boot, { once: true });
