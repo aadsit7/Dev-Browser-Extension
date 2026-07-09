@@ -318,6 +318,15 @@ textarea { resize: vertical; min-height: 80px; }
 .event-row a { color: var(--blue-600); font-weight: 600; text-decoration: none; }
 .event-row a:hover { text-decoration: underline; }
 
+/* Clarify prompt (typed ambiguity pre-check): one quick question + tappable
+   product options, styled like the events-offer pills so it matches the UI */
+.clarify-line { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; line-height: 1.5; color: var(--gray-600); }
+.clarify-line svg { flex-shrink: 0; margin-top: 2px; color: var(--blue-600); }
+.clarify-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.clarify-options button { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--gray-600); background: var(--gray-50); border: 1px solid var(--gray-150); border-radius: 999px; padding: 5px 12px; cursor: pointer; transition: color 0.15s, border-color 0.15s, background 0.15s; }
+.clarify-options button:hover { color: var(--blue-600); border-color: var(--blue-100); background: var(--blue-50); }
+.clarify-hint { margin-top: 7px; font-size: 11px; color: var(--gray-400); }
+
 /* Per-message actions */
 .msg-copy { position: absolute; top: 6px; right: 6px; background: rgba(255, 255, 255, 0.92); border: 1px solid var(--gray-150); color: var(--gray-500); padding: 4px; min-width: 26px; min-height: 26px; border-radius: 999px; cursor: pointer; display: grid; place-items: center; transition: opacity 0.12s, background 0.12s, color 0.12s, border-color 0.12s; opacity: 0; }
 .msg-wrap:hover .msg-copy, .msg-copy:focus-visible { opacity: 1; }

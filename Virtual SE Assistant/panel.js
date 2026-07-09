@@ -214,6 +214,72 @@
         additionalProperties: false
       };
 
+      // Ambiguity gate for TYPED questions only (never the live-call path).
+      // Runs BEFORE the answer call in sendMessage(): when a typed question
+      // could reasonably mean two or more DIFFERENT Recast products or
+      // components whose correct answers would materially differ, Randy asks
+      // ONE quick clarifying question with tappable options instead of
+      // guessing. High bar by design — a wrong-product guess is bad, but
+      // nagging on every question is worse, so anything short of genuine
+      // ambiguity just gets answered. This does not conflict with
+      // ASSIST_STYLE's "never ask clarifying questions" rule: that rule
+      // governs the ANSWER model; this is a separate pre-check that decides
+      // whether the answer call happens yet.
+      const AMBIGUITY_SYSTEM = [
+        'You are a fast pre-check for Randy, a Recast Software solution engineer answering a TYPED chat question. Decide whether the question is genuinely ambiguous about WHICH Recast product or component it refers to — ambiguous enough that answering for the wrong one would give inaccurate information.',
+        '',
+        'The REAL Recast portfolio — the ONLY products and components you may ever offer as options:',
+        '- Right Click Tools — ConfigMgr console extension: device actions, remote tools, Security & Compliance dashboards; components include Recast Management Server, Recast Proxy, and the Recast Agent.',
+        '- Application Manager — third-party application patching and deployment for ConfigMgr and Intune.',
+        '- Application Workspace — application packaging, delivery, and user self-service across Intune / ConfigMgr / hybrid environments (formerly Liquit); components include the Application Workspace Agent and Setup Store.',
+        '- Endpoint Insights — endpoint reporting and inventory (hardware, software, user-device affinity).',
+        '- Privilege Manager — least-privilege and local admin rights management.',
+        '- Liquit — the former name of Application Workspace; treat it as the same product.',
+        '',
+        'Set needs_clarification=true ONLY when ALL of these hold:',
+        '1. The question could reasonably refer to two or more DIFFERENT products or components from the portfolio above.',
+        '2. The correct answers for those candidates would MATERIALLY differ, so guessing wrong would mislead.',
+        '3. Neither the question itself nor the recent conversation makes the intended product clear.',
+        'This is a HIGH bar. Return needs_clarification=false when the product is named or clearly implied, when the recent conversation already establishes it, when the question is general or portfolio-wide, when it is not about a specific Recast product at all (greetings, Microsoft-stack questions, follow-ups), or when the answer would be substantially the same either way. Err toward answering — do not nag.',
+        '',
+        'When needs_clarification is true:',
+        '- clarifying_question: ONE short, friendly question, under 15 words (e.g. "Which product are you asking about?").',
+        '- options: 2 to 4 choices the user can tap. Every option MUST name one of the portfolio products above, spelled exactly as listed, optionally followed by a component or area in parentheses, e.g. "Right Click Tools (Security & Compliance dashboards)". NEVER invent a product, component, edition, or name that is not in the portfolio above.',
+        'When needs_clarification is false: clarifying_question is an empty string and options is an empty array.',
+        '',
+        'Examples (question -> verdict):',
+        '- "how do I deploy an application to my endpoints?" -> true ("Which product are you asking about?", ["Application Manager", "Application Workspace"]) — deployment works very differently in each.',
+        '- "where does the agent get installed from?" -> true ("Which agent do you mean?", ["Right Click Tools (Recast Agent)", "Application Workspace (Agent)"]).',
+        '- "does Application Workspace support macOS?" -> false — the product is named.',
+        '- "what\'s the difference between Application Manager and Application Workspace?" -> false — both are named; the comparison IS the question.',
+        '- "how do I schedule reports?" after a conversation about Endpoint Insights -> false — the recent thread establishes the product.',
+        '- "what does Recast Software do?" -> false — portfolio-wide, one answer covers it.',
+        '- "how do I set up co-management in ConfigMgr?" -> false — Microsoft-stack question, not product-ambiguous.',
+        '- "thanks, that helps!" -> false — not a technical question.',
+        '',
+        'Respond with ONLY a JSON object — no prose, no code fences.'
+      ].join('\n');
+
+      // Enforced via structured outputs, exactly like CLASSIFIER_SCHEMA.
+      const AMBIGUITY_SCHEMA = {
+        type: 'object',
+        properties: {
+          needs_clarification: { type: 'boolean', description: 'True ONLY if the typed question could mean two or more different Recast products/components whose correct answers would materially differ, and neither the question nor the recent conversation resolves it.' },
+          clarifying_question: { type: 'string',  description: 'One short friendly question under 15 words; empty string when needs_clarification is false.' },
+          options:             { type: 'array', items: { type: 'string' }, description: '2-4 real Recast product/component choices, each naming a portfolio product exactly as listed in the system prompt; empty array when needs_clarification is false.' },
+          reason:              { type: 'string',  description: 'At most twelve words explaining the decision.' }
+        },
+        required: ['needs_clarification', 'clarifying_question', 'options', 'reason'],
+        additionalProperties: false
+      };
+
+      // Client-side backstop for the "options must be real" rule: every
+      // option the clarify prompt shows must name a real portfolio product.
+      // Anything else (an invented product, a bare component with no product
+      // name) is dropped, and if fewer than two options survive the whole
+      // verdict collapses to "not ambiguous" — Randy just answers.
+      const KNOWN_PORTFOLIO_RE = /\b(right.?click tools|application manager|application workspace|endpoint insights|privilege manager|liquit|recast)\b/i;
+
       // Safety net when the classifier service is unreachable: obvious
       // technical questions still get answered.
       const TECH_TOPIC_RE = /\b(recast|liquit|application workspace|right.?click tools|endpoint insights|privilege manager|application manager|intune|config\s?manager|configmgr|sccm|mecm|autopilot|co.?management|gpo|group policy|hybrid join|win32|msi|packag(?:e|ing)|app (?:deploy|delivery|catalog)|self.?service|patch(?:ing|es)?|third.?party|mdm|endpoint)\b/i;
@@ -3551,6 +3617,57 @@
         }
       }
 
+      // Typed-question ambiguity gate (see AMBIGUITY_SYSTEM). Mirrors
+      // classifyUtterance exactly: same fast model, same proxy helper, same
+      // hard timeout, same defensive parsing, save:false. Callers treat ANY
+      // failure (unreachable, timeout, unparseable) as "not ambiguous" — a
+      // glitch in this pre-check must never block or delay an answer.
+      async function checkAmbiguity(question, recentThread, signal) {
+        if (!GSHEET_WEBHOOK) return { needs_clarification: false, clarifying_question: '', options: [], reason: '' };
+        const userContent =
+          (recentThread ? 'Recent conversation (older first):\n' + recentThread + '\n\n' : '') +
+          'Typed question:\n' + question;
+        const data = await postChat({
+          model: MODELS.classifier,
+          max_tokens: 300,
+          system: AMBIGUITY_SYSTEM,
+          messages: [{ role: 'user', content: userContent }],
+          output_config: { format: { type: 'json_schema', schema: AMBIGUITY_SCHEMA } },
+          save: false // keep pre-check churn out of the history sheet
+        }, signal, ASSIST.CLASSIFY_TIMEOUT_MS);
+        return parseAmbiguityReply(String(data.reply || ''));
+      }
+
+      // Parse defensively, like parseClassifierReply. Anything unreadable
+      // collapses to "not ambiguous". Options are validated against the real
+      // portfolio (KNOWN_PORTFOLIO_RE) and deduped; if fewer than two real
+      // options survive — or the clarifying question is missing — there is
+      // nothing usable to ask, so the verdict is "just answer".
+      function parseAmbiguityReply(reply) {
+        const notAmbiguous = { needs_clarification: false, clarifying_question: '', options: [], reason: '' };
+        const m = reply.match(/\{[\s\S]*\}/);
+        if (!m) return notAmbiguous;
+        try {
+          const j = JSON.parse(m[0]);
+          if (j.needs_clarification !== true) return notAmbiguous;
+          const q = typeof j.clarifying_question === 'string' ? j.clarifying_question.trim() : '';
+          const opts = [];
+          for (const o of (Array.isArray(j.options) ? j.options : [])) {
+            const t = typeof o === 'string' ? o.trim() : '';
+            if (t && t.length <= 80 && KNOWN_PORTFOLIO_RE.test(t) && !opts.some(x => fuzzyEqual(x, t))) opts.push(t);
+          }
+          if (!q || opts.length < 2) return notAmbiguous;
+          return {
+            needs_clarification: true,
+            clarifying_question: q,
+            options: opts.slice(0, 4),
+            reason: typeof j.reason === 'string' ? j.reason : ''
+          };
+        } catch {
+          return notAmbiguous;
+        }
+      }
+
       /* ================================================================
        * API LAYER
        * ================================================================ */
@@ -3655,7 +3772,7 @@
 
       /* ---------- conversational sends (typed input) ---------- */
 
-      async function sendMessage(idx) {
+      async function sendMessage(idx, opts) {
         const slot = STATE.slots[idx];
         // Claim the slot synchronously so near-simultaneous callers (voice
         // finalization + Enter key) can't double-send.
@@ -3666,6 +3783,15 @@
         // mic is freed and Randy's passive listener resumes.
         if (isHomeDictating(idx)) stopDictation();
         slot.loading = true;
+
+        // Ambiguity pre-check guard — one clarifying round maximum, never a
+        // loop. Skip the check when this send was produced by a clarify pick
+        // (opts.skipClarify), or when the message being sent is itself the
+        // user's typed reply to a clarify prompt (the most recent assistant
+        // message is kind:'clarify' — the thread now carries the
+        // clarification, so just answer).
+        const lastAssistant = slot.messages.filter(m => m.role === 'assistant').pop();
+        const skipClarify = !!(opts && opts.skipClarify) || !!(lastAssistant && lastAssistant.kind === 'clarify');
 
         slot.messages.push({ role: 'user', content: text });
         slot.inputText = '';
@@ -3683,6 +3809,51 @@
         scrollChat();
 
         try {
+          // Quick ambiguity gate (TYPED path only — runAssistAnswer never
+          // does this): before spending an answer call, ask the fast
+          // classifier model whether the question genuinely needs one
+          // product-disambiguation question first. Bounded and best-effort —
+          // any failure here falls straight through to a normal answer.
+          if (!skipClarify) {
+            let verdict = null;
+            try {
+              const recentThread = slot.messages.slice(0, assistantMsgIdx - 1)
+                .filter(m => (m.role === 'user' || m.role === 'assistant') && m.content)
+                .slice(-4)
+                .map(m => (m.role === 'user' ? 'User: ' : 'Randy: ') + stripMarkdown(String(m.content)).slice(0, 300))
+                .join('\n');
+              verdict = await checkAmbiguity(text, recentThread, controller.signal);
+            } catch (err) {
+              // A user cancel must still cancel; anything else means the
+              // pre-check is unavailable — never let that block the answer.
+              if (err && err.name === 'AbortError') throw err;
+              console.warn('ambiguity pre-check failed — answering directly:', err);
+            }
+            if (verdict && verdict.needs_clarification) {
+              // Ask instead of answering: swap the placeholder for a
+              // clarify message. content carries a plain-text rendition so
+              // the exchange reads correctly in the model context if the
+              // user types a free-text reply (and in the pop-out); the
+              // dedicated fields drive the tappable UI. Not a final answer,
+              // so no autoCopyAnswer and no postSaveToSheet.
+              slot.messages[assistantMsgIdx] = {
+                role: 'assistant',
+                content: verdict.clarifying_question + ' (' + verdict.options.join(' / ') + ')',
+                kind: 'clarify',
+                clarifyQuestion: verdict.clarifying_question,
+                clarifyOptions: verdict.options,
+                pendingQuestion: text
+              };
+              if (slot.abortController === controller) {
+                slot.loading = false;
+                slot.abortController = null;
+              }
+              render();
+              scrollChat();
+              return;
+            }
+          }
+
           // Typed chat answers use the exact same recipe as the overheard
           // voice path (ASSIST_STYLE, same effort, same search config, same
           // reply parsing) so the format and sources are identical no matter
@@ -4700,6 +4871,10 @@
         // no-content check below — these messages keep content empty so they
         // never enter the model context or History pairs.
         if (m.kind === 'events') return av + renderEventsBody(m);
+        // Clarify prompt (typed ambiguity check): a quick question with
+        // tappable product options — not an answer, so no copy/TTS buttons
+        // and no events offer. Branch before the answer path below.
+        if (m.kind === 'clarify') return av + renderClarifyBody(m, mi, slotIdx);
         // One render path for every Randy answer — typed or overheard — so the
         // format and sources are identical. The "Technical assist" badge is the
         // only thing unique to overheard questions.
@@ -4771,6 +4946,21 @@
                 <i data-lucide="graduation-cap" class="w-3.5 h-3.5"></i>
                 <span>${escHtml(ev.description || '')} <a href="${escAttr(safeHref(ev.url))}" target="_blank" rel="noopener noreferrer" title="${escAttr(ev.url)}">${escHtml(ev.title)}</a></span>
               </div>`).join('')}
+          </div></div>`;
+      }
+
+      // Body of a kind:'clarify' message: one short question, the real
+      // product/component options as tappable pills (data-action wired into
+      // the central click switch — Manifest V3 forbids inline handlers), and
+      // a hint that typing a reply works too. The help-circle icon keeps it
+      // reading as a quick question rather than an answer.
+      function renderClarifyBody(m, mi, slotIdx) {
+        const opts = Array.isArray(m.clarifyOptions) ? m.clarifyOptions : [];
+        return `<div class="msg-wrap"><div class="chat-bubble chat-bot" style="white-space:normal">
+            <div class="clarify-line"><i data-lucide="help-circle" class="w-3.5 h-3.5"></i><span>${escHtml(m.clarifyQuestion || 'Quick check — which product do you mean?')}</span></div>
+            ${opts.length ? `<div class="clarify-options">${opts.map(o => `
+              <button data-action="clarify-pick" data-slot="${slotIdx}" data-msg="${mi}" data-option="${escAttr(o)}">${escHtml(o)}</button>`).join('')}</div>` : ''}
+            <div class="clarify-hint">Tap one, or just type your answer below.</div>
           </div></div>`;
       }
 
@@ -6218,6 +6408,26 @@
               const m = sl && sl.messages[parseInt(act.dataset.msg, 10)];
               if (m) m.eventsDismissed = true;
               render();
+              break;
+            }
+            case 'clarify-pick': {
+              // A tapped clarify option: fold the choice into the pending
+              // question and answer it immediately. skipClarify guarantees
+              // this send never re-enters the ambiguity check (one round max).
+              const si = parseInt(act.dataset.slot, 10);
+              const sl = STATE.slots[si];
+              const mi = parseInt(act.dataset.msg, 10);
+              const m = sl && sl.messages[mi];
+              if (!sl || sl.loading || !m || m.kind !== 'clarify') break;
+              const option = act.dataset.option || '';
+              const pending = m.pendingQuestion || '';
+              if (!option || !pending) break;
+              // The pick supersedes the clarify prompt — remove it so the
+              // thread (and the model context) reads: original question,
+              // disambiguated question, answer.
+              sl.messages.splice(mi, 1);
+              sl.inputText = pending + ' — specifically about ' + option;
+              sendMessage(si, { skipClarify: true });
               break;
             }
             case 'noop': break;
