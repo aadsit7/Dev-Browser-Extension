@@ -26,6 +26,16 @@
         'learn.microsoft.com'
       ];
 
+      // Event/webinar pages Randy searches when the user accepts the
+      // "Want to see upcoming Recast sessions?" follow-up after an answer.
+      // Editable in Settings (one web address per line); these are full page
+      // URLs — the search tool gets just their hostnames as allowed_domains,
+      // and the exact pages are passed to the model as preferred sources.
+      const DEFAULT_EVENT_DOMAINS = [
+        'https://www.recastsoftware.com/resources/webinars-trainings/',
+        'https://www.recastsoftware.com/events-tradeshows-user-groups/'
+      ];
+
       // Technical-assist tuning.
       const ASSIST = {
         DEBOUNCE_MS: 1400,        // silence gap before a buffered utterance is classified
@@ -466,7 +476,8 @@
           abortController: null,        // abort the in-flight proxy fetch
           ttsQueue: null,               // FIFO of sentence TTS utterances
           speakAnswers: false,          // read answers out loud
-          allowedDomains: DEFAULT_RESEARCH_DOMAINS.slice()
+          allowedDomains: DEFAULT_RESEARCH_DOMAINS.slice(),
+          eventDomains: DEFAULT_EVENT_DOMAINS.slice()
         };
       }
 
@@ -915,7 +926,8 @@
           audioMode: s.audioMode === 'one-way' ? 'one-way' : 'two-way',
           micDeviceId: MIC.deviceId || '',
           ttsVoiceName: TTS.chosenName || '',
-          allowedDomains: s.allowedDomains
+          allowedDomains: s.allowedDomains,
+          eventDomains: s.eventDomains
         }));
         try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(data)); } catch {}
       }
@@ -953,6 +965,9 @@
             if (d.audioMode === 'one-way' || d.audioMode === 'two-way') s.audioMode = d.audioMode;
             if (Array.isArray(d.allowedDomains)) {
               s.allowedDomains = d.allowedDomains.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim());
+            }
+            if (Array.isArray(d.eventDomains)) {
+              s.eventDomains = d.eventDomains.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim());
             }
           });
           // The chosen microphone is global, not per-slot — read it off the
@@ -3740,6 +3755,9 @@
           if (Array.isArray(data.sources) && data.sources.length) {
             msg.sources = data.sources.slice(0, 6);
           }
+          // Remember what was asked so the answer can offer the "upcoming
+          // Recast sessions on this topic?" follow-up (see eventsOfferEligible).
+          msg.topicSeed = text;
           // Auto-copy the answer so it's ready to paste — same text the manual
           // copy button would put on the clipboard (stripMarkdown of content).
           autoCopyAnswer(stripMarkdown(msg.content));
@@ -4026,6 +4044,9 @@
           if (Array.isArray(data.sources) && data.sources.length) {
             msg.sources = data.sources.slice(0, 6);
           }
+          // Remember what was asked so the answer can offer the "upcoming
+          // Recast sessions on this topic?" follow-up (see eventsOfferEligible).
+          msg.topicSeed = question;
           // Auto-copy the answer so it's ready to paste — same text the manual
           // copy button would put on the clipboard (stripMarkdown of content).
           autoCopyAnswer(stripMarkdown(msg.content));
@@ -4078,6 +4099,127 @@
         scrollChat();
         // Randy is free again — answer the next overheard question, if any.
         drainQuestionQueue();
+      }
+
+      /* ================================================================
+       * "UPCOMING SESSIONS" FOLLOW-UP
+       *
+       * After a successful answer (typed or overheard) the message carries
+       * topicSeed — the original question. renderBotMessage() offers a
+       * follow-up ("Want to see upcoming Recast sessions on this topic?");
+       * accepting it runs ONE web_search through the SAME proxy path the
+       * answers use, restricted to the hostnames of slot.eventDomains, and
+       * the result lands as a kind:'events' assistant message. Event data is
+       * never invented client-side: an empty/unparseable reply falls back to
+       * a single link to the first configured events page.
+       * ================================================================ */
+
+      // Only real answers earn the follow-up offer — not errors, not the
+      // empty-reply placeholder, and not the persona's honest "I'm not sure"
+      // fallback (suggesting a webinar about a question Randy couldn't answer
+      // would read as deflection).
+      function eventsOfferEligible(m) {
+        if (!m || m.role !== 'assistant' || m.kind === 'events') return false;
+        if (!m.topicSeed || m.eventsDismissed || m.eventsRequested) return false;
+        const t = String(m.content || '').trim();
+        if (!t) return false;
+        if (t.startsWith('⚠️')) return false;
+        if (/^no response\.?$/i.test(t)) return false;
+        if (/\bnot sure about that\b/i.test(t.slice(0, 200))) return false;
+        return true;
+      }
+
+      // The configured event pages, falling back to the defaults when the
+      // Settings box is empty — same hard fallback allowedDomains uses, so a
+      // wiped box can never widen the search.
+      function eventPagesOf(slot) {
+        const configured = ((slot && slot.eventDomains) || [])
+          .filter(x => typeof x === 'string' && x.trim())
+          .map(x => x.trim());
+        return configured.length ? configured : DEFAULT_EVENT_DOMAINS.slice();
+      }
+
+      // allowed_domains wants bare hostnames; the Settings box holds full page
+      // URLs. Strip protocol and path (string-wise, so entries without a
+      // protocol survive too) and dedupe.
+      function eventSearchHostnames(pages) {
+        const hosts = [];
+        for (const u of pages) {
+          const h = String(u).trim().replace(/^https?:\/\//i, '').split(/[/?#]/)[0].trim();
+          if (h && !hosts.includes(h)) hosts.push(h);
+        }
+        // Unparseable entries must never leave allowed_domains empty (which
+        // would un-restrict the search) — fall back to the defaults' hosts.
+        return hosts.length ? hosts : eventSearchHostnames(DEFAULT_EVENT_DOMAINS);
+      }
+
+      // Parse the model's strict-JSON events reply defensively: tolerate stray
+      // fences/prose around the array, and keep only entries with a real title
+      // and an http(s) URL. Anything unparseable is simply "no events".
+      function parseEventsReply(reply) {
+        let t = String(reply || '').trim();
+        t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+        const start = t.indexOf('[');
+        const end = t.lastIndexOf(']');
+        if (start === -1 || end <= start) return [];
+        try {
+          const arr = JSON.parse(t.slice(start, end + 1));
+          if (!Array.isArray(arr)) return [];
+          return arr
+            .filter(e => e && typeof e === 'object')
+            .map(e => ({
+              title: String(e.title || '').trim(),
+              description: String(e.description || '').trim(),
+              url: String(e.url || '').trim()
+            }))
+            .filter(e => e.title && /^https?:\/\//i.test(e.url))
+            .slice(0, 3);
+        } catch {
+          return [];
+        }
+      }
+
+      const EVENTS_SEARCH_SYSTEM = [
+        'You find real, currently listed Recast Software webinars, trainings, and events using web search.',
+        'Reply with STRICT JSON only — a JSON array, no prose, no markdown fences, no commentary.',
+        'Each element: {"title": "...", "description": "one short sentence", "url": "https://..."}.',
+        'Only include sessions you actually found in the search results, with their real URLs — never invent titles, dates, or URLs.',
+        'If you find nothing relevant, reply with exactly [].'
+      ].join('\n');
+
+      // One bounded search through the existing proxy (postChat) with the
+      // existing tool shape — no new endpoints, keys, or permissions. Mutates
+      // the already-rendered kind:'events' placeholder message in place, so a
+      // "New chat" mid-search just orphans it harmlessly.
+      async function fetchUpcomingEvents(slotIdx, srcMsg, eventsMsg) {
+        const slot = STATE.slots[slotIdx];
+        const pages = eventPagesOf(slot);
+        eventsMsg.eventsFallback = pages[0];
+        try {
+          const tool = { type: SEARCH_TOOL, name: 'web_search', max_uses: ASSIST.SEARCH_MAX_USES, allowed_domains: eventSearchHostnames(pages) };
+          const topic = String(srcMsg.topicSeed || '').slice(0, 300);
+          const data = await postChat({
+            model: MODELS.chat,
+            max_tokens: 700,
+            output_config: { effort: 'medium' },
+            system: systemBlocks(EVENTS_SEARCH_SYSTEM),
+            messages: [{
+              role: 'user',
+              content: 'Find up to 3 upcoming or relevant Recast Software webinars, trainings, or events related to this topic:\n\n"' + topic + '"\n\nPrefer sessions listed on these pages:\n' + pages.join('\n') + '\n\nReply with the strict JSON array only.'
+            }],
+            tools: [tool],
+            save: false
+          }, null);
+          eventsMsg.events = parseEventsReply(data && data.reply);
+        } catch (err) {
+          // Any failure (offline, proxy error, timeout) degrades to the
+          // fallback link — the card never blocks and never invents sessions.
+          console.warn('upcoming-sessions search failed:', err);
+          eventsMsg.events = [];
+        }
+        eventsMsg.eventsLoading = false;
+        render();
+        scrollChat();
       }
 
       function scrollChat() {
@@ -4554,6 +4696,10 @@
 
       function renderBotMessage(slot, m, mi, slotIdx) {
         const av = `<div class="msg-av">${escHtml(slot.label.charAt(0))}</div>`;
+        // Upcoming-sessions card (the accepted follow-up). Branch before the
+        // no-content check below — these messages keep content empty so they
+        // never enter the model context or History pairs.
+        if (m.kind === 'events') return av + renderEventsBody(m);
         // One render path for every Randy answer — typed or overheard — so the
         // format and sources are identical. The "Technical assist" badge is the
         // only thing unique to overheard questions.
@@ -4577,6 +4723,14 @@
             : `${av}
               <div class="msg-wrap"><div class="chat-bubble chat-bot typing">${dots}</div></div>`;
         }
+        // One follow-up offer per answer, under the bubble. dismiss-events and
+        // show-events both flag the message, so it can never stack or reappear.
+        const offer = eventsOfferEligible(m) ? `
+          <div class="events-offer">
+            <span>Want to see upcoming Recast sessions on this topic?</span>
+            <button data-action="show-events" data-slot="${slotIdx}" data-msg="${mi}"><i data-lucide="calendar" class="w-3 h-3"></i>Yes, show sessions</button>
+            <button class="ghost" data-action="dismiss-events" data-slot="${slotIdx}" data-msg="${mi}">No thanks</button>
+          </div>` : '';
         return `${av}
           <div class="msg-wrap"><div class="chat-bubble chat-bot chat-md" style="padding-right:38px;white-space:normal">
             ${badge}
@@ -4585,7 +4739,39 @@
               <a href="${escAttr(safeHref(u))}" target="_blank" rel="noopener noreferrer" title="${escAttr(u)}">
                 <i data-lucide="link" class="w-3 h-3"></i>${escHtml(sourceLabelOf(u))}
               </a>`).join('')}</div>` : ''}
-          </div>${copyBtnHtml(slotIdx, mi)}${speakerBtnHtml(slotIdx, mi)}</div>`;
+          </div>${copyBtnHtml(slotIdx, mi)}${speakerBtnHtml(slotIdx, mi)}${offer}</div>`;
+      }
+
+      // Body of a kind:'events' message: loading line → compact session list
+      // (one line each: icon, one-sentence description, title as the link) →
+      // or the honest fallback link to the configured webinars page. Only
+      // parsed search results are ever shown — nothing is invented here.
+      function renderEventsBody(m) {
+        if (m.eventsLoading) {
+          return `<div class="msg-wrap"><div class="chat-bubble chat-bot" style="white-space:normal">
+              <div class="events-loading"><i data-lucide="calendar-search" class="w-3.5 h-3.5"></i>Looking for sessions…</div>
+            </div></div>`;
+        }
+        const list = Array.isArray(m.events) ? m.events : [];
+        if (!list.length) {
+          const fb = m.eventsFallback || DEFAULT_EVENT_DOMAINS[0];
+          return `<div class="msg-wrap"><div class="chat-bubble chat-bot" style="white-space:normal">
+              I couldn't find a specific upcoming session on that right now — here's the full webinars page:
+              <div class="src-chips">
+                <a href="${escAttr(safeHref(fb))}" target="_blank" rel="noopener noreferrer" title="${escAttr(fb)}">
+                  <i data-lucide="calendar" class="w-3 h-3"></i>${escHtml(sourceLabelOf(fb))}
+                </a>
+              </div>
+            </div></div>`;
+        }
+        return `<div class="msg-wrap"><div class="chat-bubble chat-bot events-card" style="white-space:normal">
+            <div class="events-head"><i data-lucide="calendar" class="w-3.5 h-3.5"></i>Upcoming Recast sessions</div>
+            ${list.map(ev => `
+              <div class="event-row">
+                <i data-lucide="graduation-cap" class="w-3.5 h-3.5"></i>
+                <span>${escHtml(ev.description || '')} <a href="${escAttr(safeHref(ev.url))}" target="_blank" rel="noopener noreferrer" title="${escAttr(ev.url)}">${escHtml(ev.title)}</a></span>
+              </div>`).join('')}
+          </div></div>`;
       }
 
       function renderUserMessage(m) {
@@ -4813,6 +4999,14 @@
                 </label>
                 <textarea id="setting-domains" rows="4" placeholder="docs.recastsoftware.com&#10;docs.liquit.com">${escHtml((slot.allowedDomains || []).join('\n'))}</textarea>
                 <p class="text-[11px] text-slate-400 mt-1">One domain per line. Technical-assist answers research only these sites (support docs). Leave empty to allow the whole web.</p>
+              </div>
+
+              <div class="full">
+                <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                  <i data-lucide="calendar" class="w-3 h-3 inline mr-1"></i>Event &amp; Webinar Sites (for follow-up suggestions)
+                </label>
+                <textarea id="setting-event-domains" rows="3" placeholder="https://www.recastsoftware.com/resources/webinars-trainings/&#10;https://www.recastsoftware.com/events-tradeshows-user-groups/">${escHtml((slot.eventDomains || []).join('\n'))}</textarea>
+                <p class="text-[11px] text-slate-400 mt-1">One web address per line. When you accept a follow-up, Randy looks here for upcoming sessions. Add other event sites here anytime.</p>
               </div>
 
               <div class="full" style="border-top:1px dashed #e2e8f0;padding-top:16px">
@@ -6007,6 +6201,25 @@
               copyTextToClipboard(stripMarkdown(m.content), act);
               break;
             }
+            case 'show-events': {
+              const sl = STATE.slots[parseInt(act.dataset.slot, 10)];
+              const m = sl && sl.messages[parseInt(act.dataset.msg, 10)];
+              if (!m || !eventsOfferEligible(m)) break;
+              m.eventsRequested = true;   // one offer per answer — never re-asks
+              const eventsMsg = { role: 'assistant', content: '', kind: 'events', eventsLoading: true, events: [], eventsFallback: '' };
+              sl.messages.push(eventsMsg);
+              render();
+              scrollChat();
+              fetchUpcomingEvents(parseInt(act.dataset.slot, 10), m, eventsMsg);
+              break;
+            }
+            case 'dismiss-events': {
+              const sl = STATE.slots[parseInt(act.dataset.slot, 10)];
+              const m = sl && sl.messages[parseInt(act.dataset.msg, 10)];
+              if (m) m.eventsDismissed = true;
+              render();
+              break;
+            }
             case 'noop': break;
             case 'load-history': {
               const hist = STATE.sessionHistory.find(h => h.id === act.dataset.id);
@@ -6033,6 +6246,7 @@
               s.voiceName = 'Randy';
               s.voicePersonality = DEFAULT_VOICE_PERSONALITY;
               s.allowedDomains = DEFAULT_RESEARCH_DOMAINS.slice();
+              s.eventDomains = DEFAULT_EVENT_DOMAINS.slice();
               saveSettings(); render(); break;
             }
           }
@@ -6130,6 +6344,10 @@
         s.voiceName = s.label;
         if (dm) {
           s.allowedDomains = dm.value.split('\n').map(x => x.trim()).filter(Boolean);
+        }
+        const ed = document.getElementById('setting-event-domains');
+        if (ed) {
+          s.eventDomains = ed.value.split('\n').map(x => x.trim()).filter(Boolean);
         }
       }
 
