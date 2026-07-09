@@ -4,10 +4,11 @@
        * CONFIG — models, endpoints, tuning constants
        * ================================================================ */
 
-      // Model routing. The coverage classifier favors latency (Haiku) — it
-      // runs against every finalized utterance during a live call.
+      // Model routing. The coverage classifier favors reasoning quality
+      // (Sonnet) — it runs against every finalized utterance during a live
+      // call, and a wrongly ticked box is worse than a slightly slower check.
       const MODELS = {
-        classifier: 'claude-haiku-4-5'
+        classifier: 'claude-sonnet-4-6'
       };
 
       // Checklist-coverage tuning.
@@ -21,7 +22,7 @@
         // unsure, nothing happens and the item stays unchecked.
         CONF_THRESHOLD: 0.8,
         DEDUPE_MS: 8000,          // ignore near-identical utterances inside this window
-        CONTEXT_LEN: 8,           // recent utterances kept as the conversation window for the classifier
+        CONTEXT_LEN: 12,          // recent utterances kept as the conversation window for the classifier
         DECISIONS_KEEP: 8,        // ring buffer for the status UI
         MAX_BUFFER_CHARS: 420,    // cap the join buffer so run-on speech still flushes
         MAX_DEFERRALS: 4,         // holds while interim speech is still flowing
@@ -60,23 +61,25 @@
       const COVERAGE_SYSTEM = [
         'You are the coverage judge for a sales assistant listening to a live sales call. The seller has a checklist of things they want to cover on this call. You are given the checklist items that are STILL UNCHECKED and the RECENT WINDOW of the conversation (transcribed speech, oldest line first).',
         '',
-        'Decide whether exactly ONE of the unchecked items has JUST BEEN GENUINELY COVERED in the conversation.',
+        'Decide whether exactly ONE of the unchecked items has JUST BEEN GENUINELY COVERED in the conversation. Never report more than one item per pass — if two items both seem covered, pick the one with the clearest evidence; the other will be caught on a later pass.',
         '',
-        '"Covered" means the item was actually discussed or completed — the topic was raised AND meaningfully addressed (explained, answered, agreed, demonstrated, or resolved). Examples of what does NOT count as covered:',
-        '- A passing mention ("we can get to pricing later", "budget is on my list for today").',
-        '- The seller merely announcing an intention ("next I want to walk through the timeline").',
-        '- A question about the topic that has not been answered yet.',
-        '- Vague adjacency (talking about money in general does not cover a specific "agree pricing" item).',
+        'The distinction that matters: a topic RAISED AND MEANINGFULLY ADDRESSED (explained, answered, agreed, demonstrated, or resolved) is covered; a topic merely MENTIONED is not. An item is NOT covered when it was:',
+        '- Mentioned in passing ("we can get to pricing later", "budget is on my list for today").',
+        '- Promised for later or announced as an intention ("next I want to walk through the timeline").',
+        '- Asked about but not yet answered — a question opens a topic; only an answer can close it.',
+        '- Only vaguely adjacent (talking about money in general does not cover a specific "agree pricing" item).',
+        '',
+        'Reason over the WHOLE window before deciding, never a single line in isolation. Coverage often spans several utterances — a question early in the window may be answered later in it — and a line that looks decisive on its own may be walked back, deferred, or left hanging a few lines later. Judge what the window as a whole establishes.',
         '',
         'Be CONSERVATIVE. Only report an item as covered when you are highly confident it was genuinely discussed or completed within this window. A wrongly ticked box misleads the seller mid-call and is far worse than waiting — the same item will be checked on a later pass once it truly has been covered. When you are unsure, or several items are only partially touched, report covered=false and do nothing.',
         '',
-        'Speech-to-text may garble words; interpret charitably, but never invent coverage that is not clearly there.',
+        'Speech-to-text may garble words; interpret charitably — a mangled word inside an otherwise clear exchange should not block an obvious match — but never invent coverage that is not clearly supported by what was actually said.',
         '',
         'Respond with ONLY a JSON object — no prose, no code fences:',
         '- covered: true only when one unchecked item was genuinely covered in this window.',
         '- item_id: the exact id of that item, copied from the list; empty string when covered is false.',
         '- confidence: your 0-to-1 certainty that the item was genuinely covered. Below 0.8 means do not act.',
-        '- evidence: one short line (under 20 words) quoting or paraphrasing what was said that covered the item; empty string when covered is false.'
+        '- evidence: one short line (under 20 words) quoting or paraphrasing what was said that covered the item — it must specifically justify THAT item, not the conversation in general; empty string when covered is false.'
       ].join('\n');
 
       // JSON schema enforced via structured outputs — the classifier reply is
