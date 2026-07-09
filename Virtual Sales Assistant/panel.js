@@ -7,8 +7,11 @@
       // Model routing. The coverage classifier favors reasoning quality
       // (Sonnet) — it runs against every finalized utterance during a live
       // call, and a wrongly ticked box is worse than a slightly slower check.
+      // The planner writes hidden per-item coverage rubrics in the background
+      // (when items are added/edited) — strong reasoning, never on the live path.
       const MODELS = {
-        classifier: 'claude-sonnet-4-6'
+        classifier: 'claude-sonnet-4-6',
+        planner:    'claude-sonnet-4-6'
       };
 
       // Checklist-coverage tuning.
@@ -69,6 +72,8 @@
         '- Asked about but not yet answered — a question opens a topic; only an answer can close it.',
         '- Only vaguely adjacent (talking about money in general does not cover a specific "agree pricing" item).',
         '',
+        'Some items include a rubric (Done when / Counts if / Might sound like / Does NOT count). When a rubric is present, treat it as the authoritative definition of coverage for that item; judge strictly against it.',
+        '',
         'Reason over the WHOLE window before deciding, never a single line in isolation. Coverage often spans several utterances — a question early in the window may be answered later in it — and a line that looks decisive on its own may be walked back, deferred, or left hanging a few lines later. Judge what the window as a whole establishes.',
         '',
         'Be CONSERVATIVE. Only report an item as covered when you are highly confident it was genuinely discussed or completed within this window. A wrongly ticked box misleads the seller mid-call and is far worse than waiting — the same item will be checked on a later pass once it truly has been covered. When you are unsure, or several items are only partially touched, report covered=false and do nothing.',
@@ -94,6 +99,50 @@
           evidence:   { type: 'string',  description: 'One short line (under 20 words) of what was said that covered the item; empty string when covered is false.' }
         },
         required: ['covered', 'item_id', 'confidence', 'evidence'],
+        additionalProperties: false
+      };
+
+      /* ================================================================
+       * PROMPTS — hidden per-item coverage rubric ("spec") generator
+       *
+       * When a checklist item is added or its text edited, a background
+       * enricher (see the checklist section) asks the planner model to write
+       * a private rubric for that item. The rubric is stored on the item and
+       * folded into the live judge's prompt, sharpening covered/not-covered
+       * decisions. Entirely invisible: no UI, and never on the live path.
+       * ================================================================ */
+
+      const SPEC_VERSION = 1;          // bump to force-regenerate every stored spec
+      const SPEC_TIMEOUT_MS = 20000;   // rubric-call ceiling — separate from the live classify timeout
+      const SPEC_DEBOUNCE_MS = 800;    // settle time after the last edit before enrichment fires
+
+      const SPEC_SYSTEM = [
+        'You write a private scoring rubric that a live sales-call coverage judge will use to decide when a checklist item has been GENUINELY covered on the call — raised AND meaningfully addressed (explained, answered, agreed, demonstrated, or resolved), never merely mentioned, promised for later, or asked about without an answer.',
+        '',
+        'You are given ONE checklist item plus the other items on the same list. Make this rubric DISTINCT from its siblings and avoid overlap: a signal that would equally indicate coverage of a sibling item belongs in the sibling\'s rubric, not this one. Be concrete and specific to this item — name the topics, artifacts, or commitments involved rather than using generic sales language.',
+        '',
+        'The judge reads imperfect speech-to-text, so example phrases should be short, natural things a seller or buyer would actually say out loud.',
+        '',
+        'Output ONLY a JSON object matching the schema — no prose, no code fences:',
+        '- definition_of_done: one crisp sentence stating what must be true in the conversation for this item to count as covered.',
+        '- covers: 2-5 concrete signals or sub-points that indicate genuine coverage.',
+        '- example_phrases: 2-5 short phrases a seller or buyer might say while covering it.',
+        '- not_covered: 2-4 near-misses that must NOT count (passing mentions, deferrals, unanswered questions, sibling-item overlap).'
+      ].join('\n');
+
+      // Structured-output schema for the rubric. Same json_schema mechanism the
+      // live classifier uses. Array-length bounds live in the descriptions —
+      // the API's schema subset doesn't allow minItems/maxItems — and the
+      // prompt keeps the arrays short so the live judge's prompt stays compact.
+      const SPEC_SCHEMA = {
+        type: 'object',
+        properties: {
+          definition_of_done: { type: 'string', description: 'One crisp sentence: what must be true in the conversation for this item to count as genuinely covered.' },
+          covers:          { type: 'array', items: { type: 'string' }, description: '2 to 5 concrete signals or sub-points that indicate genuine coverage. Keep each one short.' },
+          example_phrases: { type: 'array', items: { type: 'string' }, description: '2 to 5 short phrases a seller or buyer might plausibly say while covering this item (helps match imperfect speech-to-text).' },
+          not_covered:     { type: 'array', items: { type: 'string' }, description: '2 to 4 near-misses that must NOT count as coverage (passing mentions, deferrals, unanswered questions, overlap with sibling items).' }
+        },
+        required: ['definition_of_done', 'covers', 'example_phrases', 'not_covered'],
         additionalProperties: false
       };
 
@@ -288,8 +337,32 @@
           checkedBy: null,   // 'auto' (classifier) | 'you' (manual tap)
           evidence: '',      // what was said that covered it (auto checks only)
           checkedAt: 0,
-          noAuto: false      // manual uncheck vetoes future auto-checks (human override wins)
+          noAuto: false,     // manual uncheck vetoes future auto-checks (human override wins)
+          spec: null,        // hidden coverage rubric, generated in the background
+          specText: '',      // the exact item text the spec was built for
+          specVersion: 0     // SPEC_VERSION the spec was built under
         };
+      }
+
+      // Validate a stored/generated rubric. Anything malformed — wrong shape,
+      // wrong types, missing definition — collapses to null (item behaves as
+      // if it has no spec yet). Must never throw.
+      function sanitizeItemSpec(raw) {
+        try {
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+          const strList = v => Array.isArray(v)
+            ? v.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
+            : [];
+          const spec = {
+            definition_of_done: typeof raw.definition_of_done === 'string' ? raw.definition_of_done.trim() : '',
+            covers: strList(raw.covers),
+            example_phrases: strList(raw.example_phrases),
+            not_covered: strList(raw.not_covered)
+          };
+          return spec.definition_of_done ? spec : null;
+        } catch {
+          return null;
+        }
       }
 
       // Validate whatever came back from storage — a malformed record must
@@ -305,7 +378,10 @@
             checkedBy: (x.checkedBy === 'auto' || x.checkedBy === 'you') ? x.checkedBy : (x.checked ? 'you' : null),
             evidence: typeof x.evidence === 'string' ? x.evidence : '',
             checkedAt: Number(x.checkedAt) || 0,
-            noAuto: !!x.noAuto
+            noAuto: !!x.noAuto,
+            spec: sanitizeItemSpec(x.spec),
+            specText: typeof x.specText === 'string' ? x.specText : '',
+            specVersion: Number(x.specVersion) || 0
           }));
       }
 
@@ -329,6 +405,7 @@
           saveChecklist();
         }
         CHECKLIST.loaded = true;
+        enqueueEnrichment();   // backfill: enrich any item missing a current rubric
         return CHECKLIST;
       }
 
@@ -337,6 +414,7 @@
         if (!t) return;
         CHECKLIST.items.push(makeChecklistItem(t));
         saveChecklist();
+        enqueueEnrichment();
       }
 
       function updateChecklistItemText(id, text) {
@@ -345,6 +423,7 @@
         if (!it || !t) return;
         it.text = t;
         saveChecklist();
+        enqueueEnrichment();
       }
 
       function removeChecklistItem(id) {
@@ -426,12 +505,92 @@
       function applyDefaultChecklist() {
         CHECKLIST.items = CHECKLIST.defaults.map(makeChecklistItem);
         saveChecklist();
+        enqueueEnrichment();   // fresh items start bare — build their rubrics
       }
 
       // Items the classifier is allowed to consider: still unchecked, and not
       // manually vetoed by the seller.
       function classifiableItems() {
         return CHECKLIST.items.filter(i => !i.checked && !i.noAuto);
+      }
+
+      /* ================================================================
+       * BACKGROUND RUBRIC ENRICHMENT
+       *
+       * The only caller of generateItemSpec. Runs entirely off the live
+       * listening path: debounced behind edits, one generation call in
+       * flight at a time, best-effort (a failure just leaves the item on
+       * its bare text — the live judge never waits for it). Invisible by
+       * design: it never calls render() and shows no status.
+       * ================================================================ */
+
+      const ENRICH = { timer: 0, running: false, rerun: false };
+
+      // True when the item has no rubric for its CURRENT text under the
+      // CURRENT schema version. Check/uncheck/reorder never flip this —
+      // only a text change or a SPEC_VERSION bump does.
+      function needsSpec(item) {
+        return !item.spec || item.specText !== item.text || item.specVersion !== SPEC_VERSION;
+      }
+
+      // Debounced entry point — call after any path that lands new item text.
+      // Rapid edits / pastes collapse into one run.
+      function enqueueEnrichment() {
+        clearTimeout(ENRICH.timer);
+        ENRICH.timer = setTimeout(runEnrichment, SPEC_DEBOUNCE_MS);
+      }
+
+      async function runEnrichment() {
+        if (ENRICH.running) { ENRICH.rerun = true; return; }  // drain in progress — run again after it
+        ENRICH.running = true;
+        try {
+          // Snapshot the ids that need work; process strictly one at a time.
+          const pending = CHECKLIST.items.filter(needsSpec).map(i => i.id);
+          for (const id of pending) {
+            const item = CHECKLIST.items.find(i => i.id === id);
+            if (!item || !needsSpec(item)) continue;          // removed or already current
+            const textAtCall = item.text;
+            const spec = await generateItemSpec(item, CHECKLIST.items.map(i => i.text));
+            if (!spec) continue;  // best-effort: item keeps its bare text; retried on a later edit/load
+            const live = CHECKLIST.items.find(i => i.id === id);
+            if (!live || live.text !== textAtCall) continue;  // edited/removed mid-flight — rubric is stale
+            live.spec = spec;
+            live.specText = live.text;
+            live.specVersion = SPEC_VERSION;
+            saveChecklist();  // persist as each spec lands; nothing visible changes, so no render()
+          }
+        } finally {
+          ENRICH.running = false;
+          if (ENRICH.rerun) { ENRICH.rerun = false; enqueueEnrichment(); }
+        }
+      }
+
+      // One rubric generation call. Same proxy and structured-output plumbing
+      // as the live classifier, but its own model, prompt and (longer) timeout
+      // — the live classify timeout is never shared. Returns a sanitized spec
+      // object, or null on any failure; never throws.
+      async function generateItemSpec(item, siblingTexts) {
+        if (!GSHEET_WEBHOOK) return null;
+        try {
+          const siblings = (siblingTexts || []).filter(t => t && t !== item.text);
+          const userContent =
+            'Checklist item to write the rubric for:\n' + item.text + '\n\n' +
+            'Other items on the same checklist (keep this rubric distinct from them):\n' +
+            (siblings.length ? siblings.map(t => '- ' + t).join('\n') : '(none)');
+          const data = await postChat({
+            model: MODELS.planner,
+            max_tokens: 500,
+            system: SPEC_SYSTEM,
+            messages: [{ role: 'user', content: userContent }],
+            output_config: { format: { type: 'json_schema', schema: SPEC_SCHEMA } },
+            save: false // keep enrichment churn out of the usage sheet
+          }, null, SPEC_TIMEOUT_MS);
+          const m = String(data.reply || '').match(/\{[\s\S]*\}/);
+          if (!m) return null;
+          return sanitizeItemSpec(JSON.parse(m[0]));
+        } catch {
+          return null;
+        }
       }
 
       /* ================================================================
@@ -2404,7 +2563,22 @@
       // mechanism — only the prompt, schema and inputs changed.
       async function classifyCoverage(contextArr, uncheckedItemsArr, signal) {
         if (!GSHEET_WEBHOOK) return { covered: false, confidence: 0, parsed: true };
-        const itemLines = (uncheckedItemsArr || []).map(i => '- ' + i.id + ': ' + i.text).join('\n');
+        // Each unchecked item goes in as "- id: text"; when the item carries a
+        // current rubric (built in the background for exactly this text), it is
+        // appended compactly so the judge scores against it. An item without a
+        // rubric — or whose rubric is stale after an edit — just uses its bare
+        // text. Purely a prompt-assembly concern: never blocks, never waits.
+        const itemLines = (uncheckedItemsArr || []).map(i => {
+          let line = '- ' + i.id + ': ' + i.text;
+          const s = i.spec;
+          if (s && i.specText === i.text) {
+            if (s.definition_of_done)                                line += '\n    Done when: ' + s.definition_of_done;
+            if (Array.isArray(s.covers) && s.covers.length)          line += '\n    Counts if: ' + s.covers.join('; ');
+            if (Array.isArray(s.example_phrases) && s.example_phrases.length) line += '\n    Might sound like: ' + s.example_phrases.join('; ');
+            if (Array.isArray(s.not_covered) && s.not_covered.length) line += '\n    Does NOT count: ' + s.not_covered.join('; ');
+          }
+          return line;
+        }).join('\n');
         const ctxLines = (contextArr || []).map((u, i) => (i + 1) + '. ' + u).join('\n');
         const userContent =
           'Checklist items still unchecked:\n' + itemLines + '\n\n' +
