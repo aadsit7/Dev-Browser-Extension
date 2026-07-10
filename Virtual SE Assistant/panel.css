@@ -358,10 +358,6 @@ textarea { resize: vertical; min-height: 80px; }
 .ans-act svg { width: 15px; height: 15px; }
 .ans-act.playing { color: var(--text-accent); }
 .ans-act.copied { color: var(--green-600); background: var(--green-50); }
-.ans-act.rated { color: var(--text-accent); }
-.ans-act.rated svg { fill: var(--text-accent); }
-.ans-foot-right { display: flex; align-items: center; gap: 2px; margin-left: auto; }
-.ans-helpful { font-size: 11px; color: var(--text-tertiary); margin-right: 4px; }
 
 /* 2. Compact "Writing…" indicator while an answer is generating */
 .typing-pill { display: inline-flex; align-items: center; gap: 4px; background: #fff; border: 1px solid var(--border-subtle); border-radius: 999px; padding: 7px 14px; margin-top: 2px; }
