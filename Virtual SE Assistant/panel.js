@@ -4704,23 +4704,16 @@
           </button>`;
       }
 
+      // No avatar/name/status block here: the center console orb already
+      // carries Randy's identity and live listening state, so the header
+      // keeps only the navigation buttons.
       function renderChatHeader(slot, idx, vm) {
-        const on = !!slot.listenOn;
-        const sub = slot.isSpeaking ? 'Talking…'
-          : slot.loading ? 'Thinking…'
-          : vm.live && vm.statusClass === 'listening' && vm.pill === 'live' ? 'Listening to you…'
-          : on ? 'Listening for tech questions'
-          : 'Online · Recast product expert';
         return `
           <header class="chat-head">
             <button class="icon-btn sb-toggle" data-action="toggle-history" title="Conversations" aria-label="Open conversations">
               <i data-lucide="panel-left" class="w-5 h-5"></i>
             </button>
-            <div class="chat-avatar ${on ? '' : 'muted'}">${escHtml(slot.label.charAt(0))}<span class="status-dot"></span></div>
-            <div class="head-titles">
-              <div class="conv-title">${escHtml(slot.label)}</div>
-              <div class="conv-sub">${sub}</div>
-            </div>
+            <div class="head-titles"></div>
             <div class="head-actions">
               <button class="icon-btn" data-action="switch-tab" data-tab="settings" title="Settings" aria-label="Settings">
                 <i data-lucide="more-horizontal" class="w-5 h-5"></i>
@@ -4959,11 +4952,6 @@
           <div class="ans-foot">
             ${readBtn}
             <button class="ans-act" data-action="copy-msg" data-slot="${slotIdx}" data-msg="${mi}" title="Copy answer" aria-label="Copy answer"><i data-lucide="copy"></i></button>
-            <div class="ans-foot-right">
-              <span class="ans-helpful">Helpful?</span>
-              <button class="ans-act${m.feedback === 'up' ? ' rated' : ''}" data-action="rate-msg" data-slot="${slotIdx}" data-msg="${mi}" data-rating="up" title="Mark helpful" aria-label="Mark helpful" aria-pressed="${m.feedback === 'up'}"><i data-lucide="thumbs-up"></i></button>
-              <button class="ans-act${m.feedback === 'down' ? ' rated' : ''}" data-action="rate-msg" data-slot="${slotIdx}" data-msg="${mi}" data-rating="down" title="Mark not helpful" aria-label="Mark not helpful" aria-pressed="${m.feedback === 'down'}"><i data-lucide="thumbs-down"></i></button>
-            </div>
           </div>`;
         return `<div class="answer-card">${tldr}${renderAnswerDetail(parts.detail, m, mi, slotIdx, streaming)}${sources}${foot}</div>`;
       }
@@ -6452,20 +6440,6 @@
               const m = sl && sl.messages[parseInt(act.dataset.msg, 10)];
               if (!m) break;
               m.detailExpanded = true;
-              render();
-              break;
-            }
-            case 'rate-msg': {
-              // Thumbs on the answer card footer. Feedback is recorded on the
-              // message itself (session-scoped, like the rest of chat state);
-              // tapping the same thumb again clears it.
-              const sl = STATE.slots[parseInt(act.dataset.slot, 10)];
-              const m = sl && sl.messages[parseInt(act.dataset.msg, 10)];
-              if (!m || m.role !== 'assistant') break;
-              const rating = act.dataset.rating === 'down' ? 'down' : 'up';
-              const cleared = m.feedback === rating;
-              m.feedback = cleared ? null : rating;
-              if (!cleared) showToast(rating === 'up' ? 'Thanks — glad it helped' : 'Thanks — noted');
               render();
               break;
             }
