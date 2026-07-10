@@ -1416,6 +1416,31 @@
           .trim();
       }
 
+      // Split a rendered answer into the TL;DR sentence and the detail body
+      // for the answer card. The assist prompt opens every reply with
+      // "**Short answer:** …" on its own line; that line becomes the card's
+      // TL;DR strip and everything after it becomes the detail bullets.
+      // Replies that arrive without the marker (model drift, older history)
+      // fall back to the first sentence, so the strip is never empty and no
+      // text is ever dropped — every character lands in one zone or the other.
+      function splitAnswerParts(content) {
+        const text = String(content || '').trim();
+        const marker = text.match(/^\*\*\s*short\s+answer\s*:?\s*\*\*[:\s]*/i);
+        if (marker) {
+          const rest = text.slice(marker[0].length);
+          const nl = rest.indexOf('\n');
+          if (nl === -1) return { short: rest.trim(), detail: '' };
+          return { short: rest.slice(0, nl).trim(), detail: rest.slice(nl + 1).trim() };
+        }
+        const nl = text.indexOf('\n');
+        const firstLine = (nl === -1 ? text : text.slice(0, nl)).replace(/^[-*•]\s+/, '');
+        const sm = firstLine.match(/^.*?[.!?](?=\s|$)/);
+        const short = (sm ? sm[0] : firstLine).trim();
+        const lineRest = sm ? firstLine.slice(sm[0].length).trim() : '';
+        const tail = nl === -1 ? '' : text.slice(nl + 1).trim();
+        return { short, detail: [lineRest, tail].filter(Boolean).join('\n') };
+      }
+
       // First ~2 sentences (max 300 chars) of a plain-text blob, for TTS.
       function extractSummary(text) {
         const clean = String(text).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
@@ -4757,11 +4782,11 @@
       function consoleModel(slot, vm) {
         if (!VOICE.srSupported) return { stageKey: 'off', orbLabel: 'Unavailable', icon: 'mic-off', label: 'Voice needs Chrome or Edge', sub: 'You can still type your questions below', mode: 'prompt', text: 'Randy listens through the browser\u2019s speech engine, which runs in Chrome or Edge. Type to him here anytime.' };
         if (slot.isSpeaking) return { stageKey: 'speaking', orbLabel: 'Talking', icon: 'volume-2', label: 'Randy is talking', sub: 'Reading the answer aloud — tap the orb to stop', mode: 'prompt', text: '' };
-        if (slot.loading) {
-          const lastUser = slot.messages.slice().reverse().find(m => m.role === 'user');
-          const researching = lastUser && lastUser.kind === 'assist-q';
-          return { stageKey: 'researching', orbLabel: researching ? 'Researching' : 'Answering', icon: 'search', label: researching ? 'Researching the support docs' : 'Writing the answer', sub: researching ? 'Checking Recast & Microsoft documentation' : 'Putting the answer together', mode: 'question', text: lastUser ? lastUser.content : '' };
-        }
+        // No loading branch: while an answer is generating, the thread shows a
+        // compact inline "Writing…" pill (see renderBotMessage) instead of the
+        // old full-width "Writing the answer" stage, and the orb (voiceModel)
+        // already carries the thinking dots + cancel. The console falls through
+        // to whatever is still true — listening if the mic is on, off otherwise.
         if (TECH.pending) return { stageKey: 'analyzing', orbLabel: 'Analyzing', icon: 'scan-search', label: 'Analyzing the question', sub: 'Deciding whether this needs an answer', mode: 'question', text: TECH.activeText || VOICE.interimText || '' };
         if (slot.listenOn) return { stageKey: 'listening', orbLabel: 'Listening', icon: 'ear', label: 'Listening for questions', sub: 'Randy is on the call — speak naturally', mode: 'transcript', text: VOICE.interimText || '' };
         return { stageKey: 'off', orbLabel: 'Off', icon: 'mic', label: 'Randy is off', sub: 'Tap the mic to start listening', mode: 'prompt', text: 'Turn Randy on and he listens to your call, spots the technical questions, and answers them right here — or just type below anytime.' };
@@ -4814,11 +4839,12 @@
         const vm = voiceModel(slot, idx);
         const hasMsgs = slot.messages.length > 0;
         // While loading, the trailing assistant message IS the in-flight answer
-        // and already renders as a single "R" bubble — typing dots while it's
-        // empty, then the streaming text (see renderBotMessage). So it carries
-        // the working indicator on its own. Only fall back to a standalone dots
-        // row if, somehow, there's no trailing assistant message to host it, so
-        // the indicator is never doubled (the old "two Randys") nor lost.
+        // and already renders as a single "R" row — the compact "Writing…"
+        // pill while it's empty, then the streaming answer card (see
+        // renderBotMessage). So it carries the working indicator on its own.
+        // Only fall back to a standalone pill row if, somehow, there's no
+        // trailing assistant message to host it, so the indicator is never
+        // doubled (the old "two Randys") nor lost.
         const lastMsg = slot.messages[slot.messages.length - 1];
         const placeholderPending = !!(lastMsg && lastMsg.role === 'assistant');
         return `
@@ -4837,7 +4863,7 @@
                   `).join('') + (slot.loading && !placeholderPending ? `
                     <div class="msg-row">
                       <div class="msg-av">${escHtml(slot.label.charAt(0))}</div>
-                      <div class="chat-bubble chat-bot typing"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
+                      ${typingPillHtml()}
                     </div>
                   ` : '') : renderHomeEmpty(slot)}
                 </div>
@@ -4875,30 +4901,12 @@
         // tappable product options — not an answer, so no copy/TTS buttons
         // and no events offer. Branch before the answer path below.
         if (m.kind === 'clarify') return av + renderClarifyBody(m, mi, slotIdx);
-        // One render path for every Randy answer — typed or overheard — so the
-        // format and sources are identical. The "Technical assist" badge is the
-        // only thing unique to overheard questions.
-        const srcs = Array.isArray(m.sources) ? m.sources : [];
-        const badge = m.kind === 'assist'
-          ? `<div class="assist-badge"><i data-lucide="ear" class="w-3 h-3"></i>Technical assist</div>`
-          : '';
-        // While the answer is still arriving the placeholder has no content yet.
-        // Show the typing dots inside this single bubble (keeping the badge) so
-        // there's only ever one "R" avatar while Randy is working — instead of
-        // this empty bubble PLUS a second avatar row of dots (renderChat used to
-        // append that, which read as two Randys for every action in flight).
-        if (!m.content) {
-          const dots = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
-          return badge
-            ? `${av}
-              <div class="msg-wrap"><div class="chat-bubble chat-bot" style="white-space:normal">
-                ${badge}
-                <span class="bubble-dots">${dots}</span>
-              </div></div>`
-            : `${av}
-              <div class="msg-wrap"><div class="chat-bubble chat-bot typing">${dots}</div></div>`;
-        }
-        // One follow-up offer per answer, under the bubble. dismiss-events and
+        // While the answer is still arriving the placeholder has no content
+        // yet: a compact "Writing…" pill holds the spot next to the single "R"
+        // avatar, then the answer card replaces it as soon as tokens stream in.
+        if (!m.content) return `${av}
+          ${typingPillHtml()}`;
+        // One follow-up offer per answer, under the card. dismiss-events and
         // show-events both flag the message, so it can never stack or reappear.
         const offer = eventsOfferEligible(m) ? `
           <div class="events-offer">
@@ -4907,14 +4915,73 @@
             <button class="ghost" data-action="dismiss-events" data-slot="${slotIdx}" data-msg="${mi}">No thanks</button>
           </div>` : '';
         return `${av}
-          <div class="msg-wrap"><div class="chat-bubble chat-bot chat-md" style="padding-right:38px;white-space:normal">
-            ${badge}
-            ${mdToHtml(m.content)}
-            ${srcs.length ? `<div class="src-chips">${srcs.map(u => `
-              <a href="${escAttr(safeHref(u))}" target="_blank" rel="noopener noreferrer" title="${escAttr(u)}">
-                <i data-lucide="link" class="w-3 h-3"></i>${escHtml(sourceLabelOf(u))}
-              </a>`).join('')}</div>` : ''}
-          </div>${copyBtnHtml(slotIdx, mi)}${speakerBtnHtml(slotIdx, mi)}${offer}</div>`;
+          <div class="msg-wrap ans-wrap">${renderAnswerCard(slot, m, mi, slotIdx)}${offer}</div>`;
+      }
+
+      // Compact inline generating indicator: avatar-adjacent pill with three
+      // bouncing dots. Replaces the old full-width "Writing the answer" stage.
+      function typingPillHtml() {
+        return `<div class="typing-pill" role="status" aria-live="polite" aria-label="Randy is writing">
+            <span class="tp-dot"></span><span class="tp-dot"></span><span class="tp-dot"></span>
+            <span class="tp-text">Writing…</span>
+          </div>`;
+      }
+
+      // One Randy answer as a structured card with four stacked zones:
+      // TL;DR strip, detail bullets, sources row, action footer. One render
+      // path for every answer — typed or overheard — so format and sources are
+      // identical; the "Technical assist" tag in the TL;DR head is the only
+      // thing unique to overheard questions.
+      function renderAnswerCard(slot, m, mi, slotIdx) {
+        const parts = splitAnswerParts(m.content);
+        const srcs = Array.isArray(m.sources) ? m.sources : [];
+        const streaming = !!slot.loading && mi === slot.messages.length - 1;
+        const badge = m.kind === 'assist'
+          ? `<span class="ans-assist"><i data-lucide="ear" class="w-3 h-3"></i>Technical assist</span>`
+          : '';
+        const tldr = `
+          <div class="ans-tldr">
+            <div class="ans-tldr-head"><span class="ans-eyebrow">Short answer</span>${badge}</div>
+            <div class="ans-tldr-text">${mdInline(escHtml(parts.short))}</div>
+          </div>`;
+        const sources = srcs.length ? `
+          <div class="ans-sources">
+            <span class="ans-eyebrow ans-src-label">Sources</span>
+            ${srcs.map(u => `<a class="ans-src-chip" href="${escAttr(safeHref(u))}" target="_blank" rel="noopener noreferrer" title="${escAttr(u)}">
+              <i data-lucide="book-open"></i><span>${escHtml(sourceLabelOf(u))}</span>
+            </a>`).join('')}
+          </div>` : '';
+        const playing = !!(VOICE.playingMsg && VOICE.playingMsg.slot === slotIdx && VOICE.playingMsg.msg === mi);
+        const readBtn = VOICE.ttsSupported
+          ? `<button class="ans-act${playing ? ' playing' : ''}" data-action="tts-speak" data-slot="${slotIdx}" data-msg="${mi}" title="${playing ? 'Stop reading' : 'Read answer aloud'}" aria-label="Read answer aloud"><i data-lucide="${playing ? 'volume-x' : 'volume-2'}"></i></button>`
+          : '';
+        const foot = `
+          <div class="ans-foot">
+            ${readBtn}
+            <button class="ans-act" data-action="copy-msg" data-slot="${slotIdx}" data-msg="${mi}" title="Copy answer" aria-label="Copy answer"><i data-lucide="copy"></i></button>
+            <div class="ans-foot-right">
+              <span class="ans-helpful">Helpful?</span>
+              <button class="ans-act${m.feedback === 'up' ? ' rated' : ''}" data-action="rate-msg" data-slot="${slotIdx}" data-msg="${mi}" data-rating="up" title="Mark helpful" aria-label="Mark helpful" aria-pressed="${m.feedback === 'up'}"><i data-lucide="thumbs-up"></i></button>
+              <button class="ans-act${m.feedback === 'down' ? ' rated' : ''}" data-action="rate-msg" data-slot="${slotIdx}" data-msg="${mi}" data-rating="down" title="Mark not helpful" aria-label="Mark not helpful" aria-pressed="${m.feedback === 'down'}"><i data-lucide="thumbs-down"></i></button>
+            </div>
+          </div>`;
+        return `<div class="answer-card">${tldr}${renderAnswerDetail(parts.detail, m, mi, slotIdx, streaming)}${sources}${foot}</div>`;
+      }
+
+      // Detail zone: the bullets under the TL;DR. Long answers collapse past
+      // ~5 items behind "Show more" — but never while the answer is still
+      // streaming, so incoming text can't vanish into a collapsed zone, and
+      // never for a single trailing line that wouldn't be worth a click.
+      function renderAnswerDetail(detail, m, mi, slotIdx, streaming) {
+        if (!detail) return '';
+        const lines = String(detail).split('\n').filter(l => l.trim());
+        const CAP = 5;
+        const collapsed = !streaming && !m.detailExpanded && lines.length > CAP + 1;
+        const shown = collapsed ? lines.slice(0, CAP) : lines;
+        const more = collapsed
+          ? `<button class="ans-more" data-action="expand-msg" data-slot="${slotIdx}" data-msg="${mi}">Show more</button>`
+          : '';
+        return `<div class="ans-detail">${mdToHtml(shown.join('\n'))}${more}</div>`;
       }
 
       // Body of a kind:'events' message: loading line → compact session list
@@ -4969,18 +5036,6 @@
           ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:9.5px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;opacity:0.75;margin-bottom:4px"><i data-lucide="ear" class="w-3 h-3"></i>Overheard</span><br>'
           : '';
         return `<div class="chat-bubble chat-user">${badge}${escHtml(m.content)}</div>`;
-      }
-
-      function copyBtnHtml(slotIdx, msgIdx) {
-        return `<button class="msg-copy" title="Copy answer" aria-label="Copy answer" data-action="copy-msg" data-slot="${slotIdx}" data-msg="${msgIdx}"><i data-lucide="copy" class="w-3 h-3"></i></button>`;
-      }
-
-      function speakerBtnHtml(slotIdx, msgIdx) {
-        if (!VOICE.ttsSupported) return '';
-        const isPlayingThis = !!(VOICE.playingMsg && VOICE.playingMsg.slot === slotIdx && VOICE.playingMsg.msg === msgIdx);
-        const icon = isPlayingThis ? 'volume-x' : 'volume-2';
-        const title = isPlayingThis ? 'Stop' : 'Speak';
-        return `<button class="tts-btn ${isPlayingThis ? 'playing' : ''}" title="${title}" aria-label="${title}" data-action="tts-speak" data-slot="${slotIdx}" data-msg="${msgIdx}"><i data-lucide="${icon}" class="w-3 h-3"></i></button>`;
       }
 
       /* ---------- saved conversation (read-only, opens in place) ---------- */
@@ -6389,6 +6444,29 @@
               // Plain text, not markdown source — pastes cleanly into
               // chat/email mid-call.
               copyTextToClipboard(stripMarkdown(m.content), act);
+              break;
+            }
+            case 'expand-msg': {
+              // "Show more" on a long answer card: reveal the capped bullets.
+              const sl = STATE.slots[parseInt(act.dataset.slot, 10)];
+              const m = sl && sl.messages[parseInt(act.dataset.msg, 10)];
+              if (!m) break;
+              m.detailExpanded = true;
+              render();
+              break;
+            }
+            case 'rate-msg': {
+              // Thumbs on the answer card footer. Feedback is recorded on the
+              // message itself (session-scoped, like the rest of chat state);
+              // tapping the same thumb again clears it.
+              const sl = STATE.slots[parseInt(act.dataset.slot, 10)];
+              const m = sl && sl.messages[parseInt(act.dataset.msg, 10)];
+              if (!m || m.role !== 'assistant') break;
+              const rating = act.dataset.rating === 'down' ? 'down' : 'up';
+              const cleared = m.feedback === rating;
+              m.feedback = cleared ? null : rating;
+              if (!cleared) showToast(rating === 'up' ? 'Thanks — glad it helped' : 'Thanks — noted');
+              render();
               break;
             }
             case 'show-events': {
