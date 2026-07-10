@@ -72,6 +72,14 @@
   --n600: var(--gray-600);
   --brand-green: var(--green-600);
 
+  /* --- Semantic tokens (answer card + shared surfaces) --- */
+  --surface-accent-soft: var(--blue-50);   /* #eef3ff */
+  --border-subtle: var(--gray-150);        /* #e6eaf3 */
+  --text-accent: var(--blue-600);          /* #1f57e6 */
+  --text-secondary: var(--gray-600);       /* #545d70 */
+  --text-tertiary: var(--gray-500);        /* #737d92 */
+  --surface-sunken: var(--gray-100);       /* #eef1f8 */
+
   --radius: 16px;
   --radius-sm: 12px;
   --shadow-card: 0 1px 2px rgba(23, 29, 43, 0.06);
@@ -304,6 +312,64 @@ textarea { resize: vertical; min-height: 80px; }
 .src-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--gray-100); }
 .src-chips a { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--gray-600); background: var(--gray-50); border: 1px solid var(--gray-150); border-radius: 999px; padding: 3px 9px; text-decoration: none; transition: color 0.15s, border-color 0.15s, background 0.15s; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .src-chips a:hover { color: var(--blue-600); border-color: var(--blue-100); background: var(--blue-50); }
+
+/* ===== Assistant answer card — TL;DR strip, detail bullets, sources, actions ===== */
+.ans-wrap { max-width: 85%; }
+.answer-card { background: #fff; border: 1px solid var(--border-subtle); border-radius: 16px; overflow: hidden; box-shadow: none; }
+
+/* 1a. TL;DR strip */
+.ans-tldr { background: var(--surface-accent-soft); padding: 12px 14px; }
+.ans-tldr-head { display: flex; align-items: center; gap: 8px; }
+.ans-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-accent); line-height: 1.2; }
+.ans-assist { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-accent); }
+.ans-tldr-text { margin-top: 5px; font-size: 14px; line-height: 1.5; font-weight: 500; color: var(--navy-deep); }
+.ans-tldr-text strong { font-weight: 700; color: inherit; }
+.ans-tldr-text code { background: rgba(255, 255, 255, 0.7); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; font-family: var(--font-mono); }
+
+/* 1b. Detail bullets */
+.ans-detail { padding: 12px 14px; font-size: 13.5px; line-height: 1.5; color: var(--gray-900); }
+.ans-detail > * + * { margin-top: 10px; }
+.ans-detail p { margin: 0; }
+.ans-detail ul { list-style: none; margin: 0; padding: 0; }
+.ans-detail ul li { position: relative; padding-left: 15px; }
+.ans-detail ul li::before { content: ''; position: absolute; left: 0; top: 7px; width: 5px; height: 5px; border-radius: 50%; background: var(--blue-300); }
+.ans-detail ol { margin: 0; padding-left: 18px; }
+.ans-detail li + li { margin-top: 10px; }
+.ans-detail strong { font-weight: 600; color: var(--navy-deep); }
+.ans-detail code { background: var(--surface-sunken); padding: 2px 5px; border-radius: 4px; font-size: 12px; font-family: var(--font-mono); }
+.ans-detail a { color: var(--text-accent); text-decoration: underline; text-underline-offset: 3px; }
+/* Headings never belong inside the card — demote any stray one to bold text */
+.ans-detail .md-h { font-size: 13.5px; font-weight: 600; color: var(--navy-deep); margin: 0; }
+.ans-more { display: block; margin-top: 10px; background: none; border: none; padding: 0; font-size: 12px; font-weight: 600; color: var(--text-accent); cursor: pointer; }
+.ans-more:hover { text-decoration: underline; }
+
+/* 1c. Sources row */
+.ans-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 14px 12px; }
+.ans-src-label { color: var(--text-tertiary); margin-right: 2px; }
+.ans-src-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 500; color: var(--text-secondary); background: var(--surface-sunken); border-radius: 999px; padding: 4px 10px; text-decoration: none; max-width: 220px; transition: background 0.12s, color 0.12s; }
+.ans-src-chip svg { width: 12px; height: 12px; flex-shrink: 0; }
+.ans-src-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ans-src-chip:hover { background: var(--blue-100); color: var(--text-accent); }
+
+/* 1d. Action footer */
+.ans-foot { display: flex; align-items: center; gap: 2px; border-top: 1px solid var(--border-subtle); padding: 6px 8px; }
+.ans-act { width: 28px; height: 28px; border-radius: 8px; background: transparent; border: none; display: grid; place-items: center; color: var(--text-secondary); cursor: pointer; transition: background 0.12s, color 0.12s; line-height: 0; }
+.ans-act:hover { background: var(--surface-sunken); }
+.ans-act svg { width: 15px; height: 15px; }
+.ans-act.playing { color: var(--text-accent); }
+.ans-act.copied { color: var(--green-600); background: var(--green-50); }
+.ans-act.rated { color: var(--text-accent); }
+.ans-act.rated svg { fill: var(--text-accent); }
+.ans-foot-right { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.ans-helpful { font-size: 11px; color: var(--text-tertiary); margin-right: 4px; }
+
+/* 2. Compact "Writing…" indicator while an answer is generating */
+.typing-pill { display: inline-flex; align-items: center; gap: 4px; background: #fff; border: 1px solid var(--border-subtle); border-radius: 999px; padding: 7px 14px; margin-top: 2px; }
+.tp-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); animation: tpBounce 1.2s infinite ease-in-out; }
+.tp-dot:nth-child(2) { animation-delay: 180ms; }
+.tp-dot:nth-child(3) { animation-delay: 360ms; }
+.tp-text { font-size: 12px; color: var(--text-tertiary); margin-left: 4px; }
+@keyframes tpBounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-4px); } }
 
 /* "Upcoming sessions" follow-up: offer row under an answer + events card */
 .events-offer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--gray-600); }
@@ -643,7 +709,7 @@ textarea { resize: vertical; min-height: 80px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .orb-wrap .orb-ring, .sound-wave-bar, .typing-dot, .vp .vp-dot, .chat-avatar .status-dot, .interim-caret, .voice-toast, .vp-spin, .comp-mic.live { animation: none !important; }
+  .orb-wrap .orb-ring, .sound-wave-bar, .typing-dot, .tp-dot, .vp .vp-dot, .chat-avatar .status-dot, .interim-caret, .voice-toast, .vp-spin, .comp-mic.live { animation: none !important; }
   .orb-wrap .orb-ring { display: none; }
   .ac-scrim, .ac-modal, .sheet { animation: none !important; }
   .ac-seg-thumb, .seg2-thumb { transition: none !important; }
