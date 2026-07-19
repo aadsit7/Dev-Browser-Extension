@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "AI Projects Assistant",
+  "version": "2.0.0",
+  "description": "Track your AI projects — tap a tile for its description and working notes, all synced to your Google Sheet.",
+  "action": {
+    "default_title": "AI Projects Assistant"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["sidePanel"],
+  "host_permissions": [
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
