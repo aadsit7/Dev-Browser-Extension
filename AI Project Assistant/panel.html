@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="lib/component-logic.js"></script>
+<script src="lib/dc-runtime.js"></script>
+</head>
+<body>
+
+<x-dc>
+<helmet>
+  <style>/* latin-ext */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("lib/font-latin-ext.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("lib/font-latin.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("lib/font-latin-ext.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("lib/font-latin.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("lib/font-latin-ext.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("lib/font-latin.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("lib/font-latin-ext.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("lib/font-latin.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("lib/font-latin-ext.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("lib/font-latin.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+  <script src="lib/lucide.min.js"></script>
+  <style>
+    /* Fill the entire Chrome side panel — no default body margin, no blank
+       gutters around a fixed-width column. The app's gradient wall now covers
+       edge-to-edge at any panel width. */
+    html, body { margin:0; padding:0; height:100%; background:#e7ecfa; }
+    /* Responsive springboard: keep tiles a constant comfortable size and add
+       columns as the panel gets wider, instead of stretching 4 columns apart
+       and leaving white space. Overrides the inline 4-column grid. */
+    .bb-root .bb-page { grid-template-columns:repeat(auto-fill, minmax(76px, 1fr)) !important; }
+    /* Every tile title stays readable on every row: pages scroll vertically when
+       the panel is too short for all rows (overflow-y on the inline style), and
+       on shorter panels the rows pack tighter so the last row — titles included —
+       fits on screen without cutting anything off. */
+    @media (max-height: 760px) {
+      .bb-root .bb-page { row-gap:12px !important; padding-top:8px !important; }
+    }
+    @media (max-height: 660px) {
+      .bb-root .bb-page { row-gap:9px !important; padding-top:6px !important; }
+    }
+    @keyframes bbJiggle { 0%{transform:rotate(-1.4deg)} 50%{transform:rotate(1.4deg)} 100%{transform:rotate(-1.4deg)} }
+    @keyframes bbRing { 0%{transform:scale(1);opacity:.5} 100%{transform:scale(1.7);opacity:0} }
+    @keyframes bbMicPulse { 0%,100%{ box-shadow:0 8px 22px rgba(3,114,255,.45); } 50%{ box-shadow:0 8px 34px rgba(3,114,255,.85); } }
+    @keyframes bbBlink { 50%{opacity:.3} }
+    @keyframes bbCaret { 50%{opacity:0} }
+    @keyframes bbPop { 0%{transform:scale(.96)} 55%{transform:scale(1.04)} 100%{transform:scale(1)} }
+    @keyframes bbSheetUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
+    @keyframes bbFade { from{opacity:0} to{opacity:1} }
+    @keyframes bbToast { from{opacity:0;transform:translate(-50%,10px)} to{opacity:1;transform:translate(-50%,0)} }
+    @keyframes bbHit { 0%{ box-shadow:0 0 0 0 rgba(49,209,255,.6); } 70%{ box-shadow:0 0 0 12px rgba(49,209,255,0); } 100%{ box-shadow:0 0 0 0 rgba(49,209,255,0); } }
+    .bb-tile.bb-hit { outline:2.5px solid var(--bb-accent2); outline-offset:2px; animation:bbHit 1.2s ease-out; }
+    /* Drag affordance: the tile you're about to drop onto (to make/join a
+       folder) swells with an accent ring, the way iOS previews a folder. */
+    .bb-tile.bb-folder-target { transform:scale(1.16); box-shadow:0 0 0 3px var(--bb-accent2), 0 14px 30px rgba(22,31,91,.32) !important; transition:transform .16s var(--bb-ease), box-shadow .16s var(--bb-ease); z-index:2; }
+    /* Folder card armed to release a dragged-out site. */
+    .bb-folder-card.bb-removearm { outline:2px dashed #ef4444; outline-offset:7px; transition:outline-color .12s ease; }
+    .bb-ghost { transform-origin:50% 50%; }
+    .bb-root, .bb-root *, .bb-root *::before, .bb-root *::after { box-sizing:border-box; }
+    .bb-root *::-webkit-scrollbar{ width:0; height:0; }
+    .bb-tile-letter{ display:none; }
+    .bb-tile.noico .bb-tile-img{ display:none; }
+    .bb-tile.noico .bb-tile-letter{ display:grid; }
+    /* Snappy, tactile controls: kill the tap highlight and gesture delay, and
+       give every button (and springboard tile) instant pressed-state feedback
+       so taps register the moment a finger lands instead of feeling sticky.
+       Buttons that position themselves with an inline transform (page dots,
+       clear-search) keep it — inline styles always win — so nothing shifts. */
+    .bb-root button { -webkit-tap-highlight-color:transparent; touch-action:manipulation; transition:transform .12s var(--bb-ease), background .16s ease, color .16s ease, box-shadow .16s ease; }
+    .bb-root button:active { transform:scale(.93); }
+    .bb-tile { transition:transform .13s var(--bb-ease); }
+    .bb-cell:active .bb-tile, .bb-fapp:active .bb-tile { transform:scale(.93); }
+    /* Quick fade when the body swaps between grid and list so the view change
+       reads as one fluid motion instead of an abrupt pop. */
+    .bb-viewport, .bb-list, .bb-azrail { animation:bbFade .15s ease-out; }
+    /* Big collections: skip layout/paint for offscreen list rows so opening
+       the list view stays instant even with hundreds of sites. */
+    .bb-list > button { content-visibility:auto; contain-intrinsic-size:auto 64px; }
+    /* List view: sticky A→Z section headers, the right-edge fast-scroll rail,
+       and smooth jump scrolling. Everything themes through the --bb-* vars. */
+    .bb-list { scroll-behavior:smooth; }
+    .bb-sec-head { position:sticky; top:0; z-index:2; padding:9px 6px 6px; font-size:12px; font-weight:800; letter-spacing:.06em; color:var(--bb-fg-soft); background:var(--bb-glass); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); border-radius:9px; margin-bottom:6px; }
+    .bb-azrail { position:absolute; top:50%; right:5px; transform:translateY(-50%); z-index:3; display:flex; flex-direction:column; align-items:center; gap:1px; padding:7px 3px; border-radius:999px; background:var(--bb-glass); border:1px solid var(--bb-glass-bd); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); user-select:none; -webkit-user-select:none; }
+    .bb-azbtn { border:none; background:transparent; cursor:pointer; padding:0 4px; font-family:inherit; font-size:10px; line-height:1.4; font-weight:800; color:var(--bb-accent); }
+  </style>
+</helmet>
+<div class="bb-root" style="position:relative; width:100%; max-width:100%; height:100dvh; margin:0; display:flex; flex-direction:column; overflow:hidden; font-family:'DM Sans',system-ui,sans-serif; color:var(--bb-fg); background:var(--bb-wall); -webkit-font-smoothing:antialiased;">
+
+  <!-- ===== Header: greeting ===== -->
+  <header style="flex-shrink:0; padding:18px 22px 8px;">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+      <div style="min-width:0;">
+        <div style="font-size:21px; font-weight:800; letter-spacing:-.02em; line-height:1.1;">AI Projects <span style="color:var(--bb-accent2);">Assistant</span></div>
+        <div style="font-size:12.5px; font-weight:600; color:var(--bb-fg-soft); margin-top:3px;">{{ subtitle }}</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== Body: search results OR springboard ===== -->
+  <sc-if value="{{ showResults }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1; min-height:0; overflow-y:auto; padding:8px 18px 18px;">
+      <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+        <div style="text-align:center; padding:60px 24px; color:var(--bb-fg-soft);">
+          <i data-lucide="search-x" style="width:34px;height:34px; opacity:.5;"></i>
+          <div style="font-size:14px; font-weight:600; margin-top:12px; line-height:1.5;">No projects match “{{ search }}”.<br>Try a different word.</div>
+        </div>
+      </sc-if>
+      <sc-for list="{{ results }}" as="r" hint-placeholder-count="4">
+        <button data-id="{{ r.id }}" onclick="{{ r.onTap }}" style="display:flex; align-items:center; gap:13px; width:100%; text-align:left; padding:11px 13px; margin-bottom:8px; border-radius:15px; border:1px solid var(--bb-glass-bd); background:var(--bb-glass); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); cursor:pointer; font-family:inherit;">
+          <span style="width:40px; height:40px; border-radius:11px; flex-shrink:0; display:grid; place-items:center; background:var(--bb-tile); box-shadow:var(--bb-tile-sh); overflow:hidden;"><img class="bb-ico" data-src="{{ r.icon }}" data-letter="{{ r.letter }}" style="width:24px;height:24px;display:block;"></span>
+          <span style="flex:1; min-width:0;">
+            <span style="display:block; font-size:14px; font-weight:700; color:var(--bb-fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ r.name }}</span>
+            <span style="display:block; font-size:11.5px; font-weight:500; color:var(--bb-fg-soft); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px;">{{ r.host }}</span>
+          </span>
+          <i data-lucide="arrow-up-right" style="width:18px;height:18px;color:var(--bb-fg-soft);flex-shrink:0;"></i>
+        </button>
+      </sc-for>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ showBoard }}" hint-placeholder-val="{{ true }}">
+    <div class="bb-viewport" style="flex:1; min-height:0; overflow:hidden; touch-action:pan-y; position:relative;">
+      <div class="bb-track" style="display:flex; height:100%; transition:transform .26s cubic-bezier(.16,1,.3,1); will-change:transform;">
+        <sc-for list="{{ pages }}" as="pg" hint-placeholder-count="2">
+          <div class="bb-page" style="flex:0 0 100%; height:100%; display:grid; grid-template-columns:repeat(4,1fr); align-content:start; justify-items:center; gap:18px 6px; padding:14px 18px 24px; box-sizing:border-box; overflow-x:hidden; overflow-y:auto;">
+            <div style="grid-column:1/-1; width:100%; text-align:center; font-size:13px; font-weight:700; letter-spacing:-.01em; color:var(--bb-fg-soft); padding:0 0 4px;">{{ pg.name }}</div>
+            <sc-for list="{{ pg.cells }}" as="cell" hint-placeholder-count="12">
+              <div class="bb-cell" data-id="{{ cell.id }}" data-kind="{{ cell.kind }}" data-idx="{{ cell.idx }}" style="position:relative; display:flex; flex-direction:column; align-items:center; gap:6px; width:100%; user-select:none; -webkit-user-select:none;">
+                <sc-if value="{{ editMode }}" hint-placeholder-val="{{ false }}">
+                  <button class="bb-badge" onclick="{{ cell.onDelete }}" aria-label="Remove" style="position:absolute; top:-7px; left:50%; margin-left:-21px; z-index:3; width:22px; height:22px; border-radius:50%; border:none; cursor:pointer; background:#fff; color:#15171f; box-shadow:0 1px 5px rgba(0,0,0,.4); display:grid; place-items:center;"><i data-lucide="minus" style="width:14px;height:14px;"></i></button>
+                </sc-if>
+                <sc-if value="{{ cell.isFolder }}" hint-placeholder-val="{{ false }}">
+                  <div class="bb-tile bb-folder" style="position:relative; width:62px; height:62px; border-radius:17px; display:grid; grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(3,1fr); gap:3px; padding:6px; background:var(--bb-folder); border:1px solid var(--bb-glass-bd); -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px); box-shadow:var(--bb-tile-sh); cursor:pointer;">
+                    <sc-for list="{{ cell.mini }}" as="m" hint-placeholder-count="4">
+                      <span style="border-radius:5px; background:#fff; display:grid; place-items:center; overflow:hidden;"><img class="bb-ico" data-src="{{ m.src }}" data-letter="{{ m.letter }}" style="width:100%;height:100%;object-fit:contain;padding:1px;"></span>
+                    </sc-for>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ cell.isApp }}" hint-placeholder-val="{{ true }}">
+                  <div class="bb-tile {{ cell.tileClass }}" data-bg="{{ cell.grad }}" style="position:relative; width:62px; height:62px; border-radius:17px; display:grid; place-items:center; overflow:hidden; background:var(--bb-tile); border:1px solid var(--bb-tile-bd); box-shadow:var(--bb-tile-sh); cursor:pointer;">
+                    <img class="bb-tile-img bb-ico" data-src="{{ cell.icon }}" data-letter="{{ cell.letter }}" style="width:34px; height:34px; display:block;">
+                    <span class="bb-tile-letter" style="position:absolute; inset:0; place-items:center; font-size:26px; font-weight:800; color:#fff;">{{ cell.letter }}</span>
+                  </div>
+                </sc-if>
+                <span style="font-size:11.5px; font-weight:600; line-height:1.22; text-align:center; color:var(--bb-label); max-width:78px; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; word-break:break-word; text-shadow:0 1px 2px var(--bb-label-shadow);">{{ cell.name }}</span>
+              </div>
+            </sc-for>
+            <sc-if value="{{ pg.empty }}" hint-placeholder-val="{{ false }}">
+              <div style="grid-column:1/-1; text-align:center; color:var(--bb-fg-soft); font-size:13px; line-height:1.6; padding:40px 16px;">This page is empty.<br>Tap <b>+</b> to add a project.</div>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- rename current page (edit mode) -->
+    <sc-if value="{{ editMode }}" hint-placeholder-val="{{ false }}">
+      <div style="flex-shrink:0; display:flex; justify-content:center; padding:0 18px 6px;">
+        <input type="text" value="{{ pageTitle }}" oninput="{{ onPageName }}" placeholder="Page name" spellcheck="false" style="width:60%; max-width:220px; height:34px; text-align:center; padding:0 12px; border-radius:11px; border:1px solid var(--bb-glass-bd); background:var(--bb-search-bg); color:var(--bb-fg); font-family:inherit; font-size:13px; font-weight:700; outline:none;">
+      </div>
+    </sc-if>
+
+    <!-- page dots / done bar -->
+    <div style="flex-shrink:0; display:flex; align-items:center; justify-content:center; gap:8px; height:30px;">
+      <sc-if value="{{ editMode }}" hint-placeholder-val="{{ false }}">
+        <button onclick="{{ exitEdit }}" style="border:none; background:var(--bb-accent); color:#fff; font-family:inherit; font-size:12.5px; font-weight:700; padding:6px 18px; border-radius:999px; cursor:pointer; box-shadow:0 4px 12px rgba(3,114,255,.4);">Done</button>
+      </sc-if>
+      <sc-if value="{{ showDots }}" hint-placeholder-val="{{ true }}">
+        <sc-for list="{{ dots }}" as="d" hint-placeholder-count="3">
+          <button onclick="{{ d.go }}" aria-label="Page" style="width:7px; height:7px; padding:0; border:none; border-radius:50%; cursor:pointer; background:{{ d.bg }}; transform:scale({{ d.scale }}); transition:transform .15s, background .15s;"></button>
+        </sc-for>
+      </sc-if>
+    </div>
+
+  </sc-if>
+
+  <!-- ===== List view: every site A→Z with a fast-scroll letter rail ===== -->
+  <sc-if value="{{ showList }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1; min-height:0; position:relative;">
+      <div class="bb-list" style="height:100%; overflow-y:auto; padding:2px 36px 18px 18px;">
+        <sc-if value="{{ listEmpty }}" hint-placeholder-val="{{ false }}">
+          <div style="text-align:center; padding:60px 24px; color:var(--bb-fg-soft);">
+            <i data-lucide="list" style="width:34px;height:34px; opacity:.5;"></i>
+            <div style="font-size:14px; font-weight:600; margin-top:12px; line-height:1.5;">No projects yet — tap + to add one.</div>
+          </div>
+        </sc-if>
+        <sc-for list="{{ listSections }}" as="sec" hint-placeholder-count="3">
+          <div id="bb-sec-{{ sec.letter }}" class="bb-sec-head">{{ sec.letter }}</div>
+          <sc-for list="{{ sec.rows }}" as="r" hint-placeholder-count="4">
+            <button data-id="{{ r.id }}" onclick="{{ r.onTap }}" style="display:flex; align-items:center; gap:13px; width:100%; text-align:left; padding:11px 13px; margin-bottom:8px; border-radius:15px; border:1px solid var(--bb-glass-bd); background:var(--bb-glass); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); cursor:pointer; font-family:inherit;">
+              <span style="width:40px; height:40px; border-radius:11px; flex-shrink:0; display:grid; place-items:center; background:var(--bb-tile); box-shadow:var(--bb-tile-sh); overflow:hidden;"><img class="bb-ico" data-src="{{ r.icon }}" data-letter="{{ r.letter }}" style="width:24px;height:24px;display:block;"></span>
+              <span style="flex:1; min-width:0;">
+                <span style="display:block; font-size:14px; font-weight:700; color:var(--bb-fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ r.name }}</span>
+                <span style="display:block; font-size:11.5px; font-weight:500; color:var(--bb-fg-soft); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px;">{{ r.host }}</span>
+              </span>
+              <i data-lucide="arrow-up-right" style="width:18px;height:18px;color:var(--bb-fg-soft);flex-shrink:0;"></i>
+            </button>
+          </sc-for>
+        </sc-for>
+      </div>
+      <!-- A–Z fast-scroll rail -->
+      <sc-if value="{{ !listEmpty }}" hint-placeholder-val="{{ true }}">
+        <div class="bb-azrail">
+          <sc-for list="{{ azIndex }}" as="L" hint-placeholder-count="8">
+            <button onclick="{{ L.go }}" class="bb-azbtn" aria-label="Jump to {{ L.letter }}">{{ L.letter }}</button>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+  </sc-if>
+
+  <!-- ===== Bottom bar: search + dock (always visible) ===== -->
+  <div style="flex-shrink:0;">
+    <!-- search -->
+    <div style="position:relative; margin:0 18px 10px;">
+      <i data-lucide="search" style="position:absolute; left:14px; top:50%; transform:translateY(-50%); width:17px; height:17px; color:var(--bb-fg-soft); pointer-events:none;"></i>
+      <input type="text" data-no-dictate value="{{ search }}" oninput="{{ onSearch }}" placeholder="Search projects or say “open…”" spellcheck="false" style="width:100%; height:42px; padding:0 38px 0 40px; border-radius:14px; border:1px solid var(--bb-glass-bd); background:var(--bb-search-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:600; outline:none; -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);">
+      <sc-if value="{{ hasSearch }}" hint-placeholder-val="{{ false }}">
+        <button onclick="{{ clearSearch }}" aria-label="Clear" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); width:28px; height:28px; border:none; border-radius:50%; cursor:pointer; display:grid; place-items:center; background:var(--bb-glass-bd); color:var(--bb-fg);"><i data-lucide="x" style="width:15px;height:15px;"></i></button>
+      </sc-if>
+    </div>
+    <!-- dock — microphone on the left-hand side, plus (add site) on the right -->
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 18px 18px; padding:11px 16px; border-radius:24px; background:var(--bb-glass); border:1px solid var(--bb-glass-bd); -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); box-shadow:var(--bb-glass-sh);">
+      <button onclick="{{ toggleMic }}" aria-label="{{ micLabel }}" style="position:relative; width:62px; height:62px; border-radius:50%; border:none; cursor:pointer; display:grid; place-items:center; margin-top:-14px; {{ micBtnStyle }} {{ micBtnAnim }}"><span class="bb-mic-ring" style="{{ micRingStyle }}"></span><span style="{{ micIconOnStyle }}"><i data-lucide="mic" style="width:27px;height:27px;"></i></span><span style="{{ micIconOffStyle }}"><i data-lucide="mic-off" style="width:27px;height:27px;"></i></span></button>
+      <button onclick="{{ toggleList }}" aria-label="List view" style="width:46px; height:46px; border-radius:15px; border:none; cursor:pointer; display:grid; place-items:center; background:var(--bb-ctl); color:var(--bb-fg); box-shadow:var(--bb-tile-sh); {{ listBtnStyle }}"><i data-lucide="list" style="width:22px;height:22px;"></i></button>
+      <button onclick="{{ openSettings }}" aria-label="Settings" style="width:46px; height:46px; border-radius:15px; border:none; cursor:pointer; display:grid; place-items:center; background:var(--bb-ctl); color:var(--bb-fg); box-shadow:var(--bb-tile-sh);"><i data-lucide="settings-2" style="width:22px;height:22px;"></i></button>
+      <button onclick="{{ openAdd }}" aria-label="Add project" style="width:46px; height:46px; border-radius:15px; border:none; cursor:pointer; display:grid; place-items:center; background:var(--bb-ctl); color:var(--bb-fg); box-shadow:var(--bb-tile-sh);"><i data-lucide="plus" style="width:23px;height:23px;"></i></button>
+    </div>
+  </div>
+
+  <!-- ===== Voice overlay ===== -->
+  <sc-if value="{{ voiceOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:140; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:28px 26px; background:var(--bb-scrim); -webkit-backdrop-filter:blur(22px); backdrop-filter:blur(22px); animation:bbFade .2s ease-out;">
+      <button onclick="{{ closeVoice }}" aria-label="Close" style="position:absolute; top:18px; right:18px; width:38px; height:38px; border-radius:50%; border:none; cursor:pointer; display:grid; place-items:center; background:var(--bb-glass-bd); color:var(--bb-fg);"><i data-lucide="x" style="width:19px;height:19px;"></i></button>
+      <div style="position:relative; width:150px; height:150px; display:grid; place-items:center;">
+        <span class="bb-vring" style="position:absolute; inset:18px; border-radius:50%; border:2px solid var(--bb-accent2); opacity:0;"></span>
+        <span class="bb-vring" style="position:absolute; inset:18px; border-radius:50%; border:2px solid var(--bb-accent2); opacity:0; animation-delay:.95s;"></span>
+        <button onclick="{{ toggleListen }}" aria-label="Toggle" style="position:relative; z-index:1; width:114px; height:114px; border-radius:50%; border:none; cursor:pointer; display:grid; place-items:center; color:#fff; background:var(--bb-orb-bg); box-shadow:var(--bb-orb-sh); transition:background .2s, color .2s, box-shadow .2s;"><i data-lucide="{{ orbIcon }}" style="width:42px;height:42px;"></i></button>
+      </div>
+      <div style="margin-top:22px; display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:700; color:var(--bb-fg); background:var(--bb-glass); border:1px solid var(--bb-glass-bd); padding:7px 16px; border-radius:999px;">
+        <span style="width:8px; height:8px; border-radius:50%; background:{{ statusDot }}; {{ statusAnim }}"></span>{{ voiceStatus }}
+      </div>
+      <div style="margin-top:22px; width:100%; min-height:60px; text-align:center; font-size:22px; font-weight:700; line-height:1.35; letter-spacing:-.01em; color:{{ transcriptColor }}; text-wrap:pretty; overflow-wrap:break-word;">{{ transcript }}<span style="{{ caretStyle }}"></span></div>
+      <div style="margin-top:24px; display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">
+        <sc-for list="{{ voiceExamples }}" as="ex" hint-placeholder-count="3">
+          <span style="font-size:12px; font-weight:600; color:var(--bb-fg-soft); background:var(--bb-glass); border:1px solid var(--bb-glass-bd); border-radius:999px; padding:6px 13px;">“{{ ex }}”</span>
+        </sc-for>
+      </div>
+      <sc-if value="{{ noVoice }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:20px; font-size:12.5px; font-weight:600; color:var(--bb-fg-soft); text-align:center; max-width:280px; line-height:1.5;">Voice needs Chrome or Edge. You can still tap any project to open it.</div>
+      </sc-if>
+    </div>
+  </sc-if>
+
+  <!-- ===== Add sheet ===== -->
+  <sc-if value="{{ adding }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:150; display:flex; flex-direction:column; justify-content:flex-end; animation:bbFade .18s ease-out;">
+      <div onclick="{{ closeAdd }}" style="position:absolute; inset:0; background:var(--bb-scrim2);"></div>
+      <div style="position:relative; background:var(--bb-sheet); border-radius:24px 24px 0 0; padding:10px 22px calc(22px + env(safe-area-inset-bottom)); box-shadow:0 -10px 40px rgba(0,0,0,.3); animation:bbSheetUp .26s cubic-bezier(.16,1,.3,1);">
+        <div style="width:38px; height:5px; border-radius:3px; background:var(--bb-glass-bd); margin:0 auto 16px;"></div>
+        <div style="font-size:19px; font-weight:800; letter-spacing:-.01em; color:var(--bb-fg);">Add a project</div>
+        <div style="font-size:13px; font-weight:500; color:var(--bb-fg-soft); margin-top:4px;">Track an AI project — only the name is required.</div>
+        <div style="display:flex; flex-direction:column; gap:10px; margin:18px 0 16px;">
+          <input type="text" value="{{ draftName }}" oninput="{{ onDraftName }}" placeholder="Name (e.g. Claude)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:15px; font-weight:600; outline:none;">
+          <input type="text" value="{{ draftIcon }}" oninput="{{ onDraftIcon }}" placeholder="Icon image URL (optional)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:600; outline:none;">
+          <input type="text" value="{{ draftUrl }}" oninput="{{ onDraftUrl }}" placeholder="Link (optional — e.g. claude.ai)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:15px; font-weight:600; outline:none;">
+          <input type="text" value="{{ draftDesc }}" oninput="{{ onDraftDesc }}" placeholder="Description (optional)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:600; outline:none;">
+        </div>
+        <div style="font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--bb-fg-soft); margin-bottom:9px;">Quick add</div>
+        <div style="display:flex; flex-wrap:wrap; gap:7px; margin-bottom:18px;">
+          <sc-for list="{{ suggestions }}" as="s" hint-placeholder-count="5">
+            <button onclick="{{ s.add }}" style="display:inline-flex; align-items:center; gap:7px; padding:6px 13px 6px 8px; border-radius:999px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); cursor:pointer; font-family:inherit; font-size:12.5px; font-weight:700;"><img class="bb-ico" data-src="{{ s.icon }}" data-letter="{{ s.letter }}" style="width:18px;height:18px;border-radius:4px;">{{ s.name }}</button>
+          </sc-for>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <button onclick="{{ closeAdd }}" style="flex:1; height:48px; border-radius:14px; border:1.5px solid var(--bb-input-bd); background:transparent; color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:700; cursor:pointer;">Cancel</button>
+          <button onclick="{{ saveAdd }}" style="flex:1.4; height:48px; border-radius:14px; border:none; background:var(--bb-accent); color:#fff; font-family:inherit; font-size:14px; font-weight:700; cursor:pointer; box-shadow:0 4px 14px rgba(3,114,255,.4);">Add project</button>
+        </div>
+
+        <!-- Pages: add a new page or reorder the existing ones -->
+        <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--bb-input-bd);">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px;">
+            <div style="font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--bb-fg-soft);">Pages</div>
+            <button onclick="{{ addPage }}" style="display:inline-flex; align-items:center; gap:6px; padding:7px 13px; border-radius:999px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-accent); cursor:pointer; font-family:inherit; font-size:12.5px; font-weight:700;"><i data-lucide="plus" style="width:15px;height:15px;"></i>Add page</button>
+          </div>
+          <div style="max-height:188px; overflow-y:auto;">
+            <sc-for list="{{ pageList }}" as="pl" hint-placeholder-count="3">
+              <div style="display:flex; align-items:center; gap:10px; padding:9px 2px; border-top:1px solid var(--bb-input-bd);">
+                <span style="flex:1; min-width:0; font-size:14px; font-weight:700; color:var(--bb-fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ pl.label }}</span>
+                <span style="flex-shrink:0; font-size:11.5px; font-weight:600; color:var(--bb-fg-soft);">{{ pl.count }}</span>
+                <button onclick="{{ pl.moveUp }}" aria-label="Move page up" style="flex-shrink:0; width:34px; height:34px; border-radius:10px; border:1px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); cursor:pointer; display:grid; place-items:center; {{ pl.upStyle }}"><i data-lucide="chevron-up" style="width:18px;height:18px;"></i></button>
+                <button onclick="{{ pl.moveDown }}" aria-label="Move page down" style="flex-shrink:0; width:34px; height:34px; border-radius:10px; border:1px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); cursor:pointer; display:grid; place-items:center; {{ pl.downStyle }}"><i data-lucide="chevron-down" style="width:18px;height:18px;"></i></button>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== Project detail view (tap a tile) =====
+       The heart of the app now: description + working notes per project,
+       auto-saved to the Google Sheet when the view closes. -->
+  <sc-if value="{{ detailOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:145; display:flex; flex-direction:column; justify-content:flex-end; animation:bbFade .18s ease-out;">
+      <div onclick="{{ closeDetail }}" style="position:absolute; inset:0; background:var(--bb-scrim2);"></div>
+      <div style="position:relative; display:flex; flex-direction:column; max-height:88%; background:var(--bb-sheet); border-radius:24px 24px 0 0; padding:10px 22px calc(22px + env(safe-area-inset-bottom)); box-shadow:0 -10px 40px rgba(0,0,0,.3); animation:bbSheetUp .26s cubic-bezier(.16,1,.3,1);">
+        <div style="flex-shrink:0; width:38px; height:5px; border-radius:3px; background:var(--bb-glass-bd); margin:0 auto 16px;"></div>
+        <div style="flex-shrink:0; display:flex; align-items:center; gap:13px;">
+          <span class="bb-tile" data-bg="{{ detailGrad }}" style="position:relative; width:54px; height:54px; border-radius:15px; flex-shrink:0; display:grid; place-items:center; overflow:hidden; background:var(--bb-tile); border:1px solid var(--bb-tile-bd); box-shadow:var(--bb-tile-sh);"><img class="bb-tile-img bb-ico" data-src="{{ detailIcon }}" data-letter="{{ detailLetter }}" style="width:30px; height:30px; display:block;"><span class="bb-tile-letter" style="position:absolute; inset:0; place-items:center; font-size:22px; font-weight:800; color:#fff;">{{ detailLetter }}</span></span>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:19px; font-weight:800; letter-spacing:-.01em; color:var(--bb-fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ detailName }}</div>
+            <sc-if value="{{ detailHasUrl }}" hint-placeholder-val="{{ false }}">
+              <div style="font-size:12px; font-weight:500; color:var(--bb-fg-soft); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ detailHost }}</div>
+            </sc-if>
+          </div>
+          <button onclick="{{ editFromDetail }}" aria-label="Edit project" style="flex-shrink:0; width:38px; height:38px; border-radius:12px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); cursor:pointer; display:grid; place-items:center;"><i data-lucide="pencil" style="width:17px;height:17px;"></i></button>
+        </div>
+        <div style="flex:1; min-height:0; display:flex; flex-direction:column; gap:10px; margin:16px 0 0; overflow-y:auto;">
+          <div style="flex-shrink:0; font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--bb-fg-soft);">Description</div>
+          <input type="text" value="{{ detailDesc }}" oninput="{{ onDetailDesc }}" placeholder="What is this project?" spellcheck="false" style="flex-shrink:0; width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:600; outline:none;">
+          <div style="flex-shrink:0; font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--bb-fg-soft); margin-top:4px;">Notes</div>
+          <textarea oninput="{{ onDetailNotes }}" value="{{ detailNotes }}" placeholder="Working notes — saved to your sheet when you close this view. You can also dictate: just talk while this box is focused." spellcheck="false" style="width:100%; min-height:170px; padding:12px 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:500; line-height:1.5; outline:none; resize:none;"></textarea>
+        </div>
+        <div style="flex-shrink:0; display:flex; gap:10px; margin-top:14px;">
+          <sc-if value="{{ detailHasUrl }}" hint-placeholder-val="{{ false }}">
+            <button onclick="{{ openDetailUrl }}" style="flex:1; height:48px; border-radius:14px; border:1.5px solid var(--bb-input-bd); background:transparent; color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:8px;"><i data-lucide="external-link" style="width:16px;height:16px;"></i>Open</button>
+          </sc-if>
+          <button onclick="{{ closeDetail }}" style="flex:1.4; height:48px; border-radius:14px; border:none; background:var(--bb-accent); color:#fff; font-family:inherit; font-size:14px; font-weight:700; cursor:pointer; box-shadow:0 4px 14px rgba(3,114,255,.4);">Done</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== Edit sheet (tap a tile while in edit mode) ===== -->
+  <sc-if value="{{ editing }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:160; display:flex; flex-direction:column; justify-content:flex-end; animation:bbFade .18s ease-out;">
+      <div onclick="{{ closeEdit }}" style="position:absolute; inset:0; background:var(--bb-scrim2);"></div>
+      <div style="position:relative; background:var(--bb-sheet); border-radius:24px 24px 0 0; padding:10px 22px calc(22px + env(safe-area-inset-bottom)); box-shadow:0 -10px 40px rgba(0,0,0,.3); animation:bbSheetUp .26s cubic-bezier(.16,1,.3,1);">
+        <div style="width:38px; height:5px; border-radius:3px; background:var(--bb-glass-bd); margin:0 auto 16px;"></div>
+        <div style="display:flex; align-items:center; gap:13px;">
+          <span class="bb-tile" data-bg="var(--bb-accent)" style="position:relative; width:48px; height:48px; border-radius:13px; flex-shrink:0; display:grid; place-items:center; overflow:hidden; background:var(--bb-tile); border:1px solid var(--bb-tile-bd); box-shadow:var(--bb-tile-sh);"><img class="bb-tile-img bb-ico" data-src="{{ editIconPreview }}" data-letter="{{ editLetter }}" style="width:28px; height:28px; display:block;"><span class="bb-tile-letter" style="position:absolute; inset:0; place-items:center; font-size:20px; font-weight:800; color:#fff;">{{ editLetter }}</span></span>
+          <div style="min-width:0;">
+            <div style="font-size:19px; font-weight:800; letter-spacing:-.01em; color:var(--bb-fg);">Edit project</div>
+            <div style="font-size:13px; font-weight:500; color:var(--bb-fg-soft); margin-top:2px;">Change its name, link, icon, description, or notes.</div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:10px; margin:18px 0 8px;">
+          <input type="text" value="{{ editName }}" oninput="{{ onEditName }}" placeholder="Name (e.g. Claude)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:15px; font-weight:600; outline:none;">
+          <input type="text" value="{{ editUrl }}" oninput="{{ onEditUrl }}" placeholder="Link (optional — e.g. claude.ai)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:15px; font-weight:600; outline:none;">
+          <input type="text" value="{{ editIcon }}" oninput="{{ onEditIcon }}" placeholder="Icon image URL (optional — defaults to favicon)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:600; outline:none;">
+          <input type="text" value="{{ editDesc }}" oninput="{{ onEditDesc }}" placeholder="Description (optional)" spellcheck="false" style="width:100%; height:46px; padding:0 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:600; outline:none;">
+          <textarea oninput="{{ onEditNotes }}" value="{{ editNotes }}" placeholder="Notes (optional)" spellcheck="false" style="width:100%; min-height:64px; padding:11px 15px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:600; line-height:1.45; outline:none; resize:none;"></textarea>
+        </div>
+        <sc-if value="{{ showEditActions }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex; gap:10px; margin-top:10px;">
+            <button onclick="{{ askDeleteEdit }}" aria-label="Delete" style="flex-shrink:0; width:48px; height:48px; border-radius:14px; border:1.5px solid rgba(239,68,68,.5); background:transparent; color:#ef4444; cursor:pointer; display:grid; place-items:center;"><i data-lucide="trash-2" style="width:19px;height:19px;"></i></button>
+            <button onclick="{{ closeEdit }}" style="flex:1; height:48px; border-radius:14px; border:1.5px solid var(--bb-input-bd); background:transparent; color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:700; cursor:pointer;">Cancel</button>
+            <button onclick="{{ saveEdit }}" style="flex:1.4; height:48px; border-radius:14px; border:none; background:var(--bb-accent); color:#fff; font-family:inherit; font-size:14px; font-weight:700; cursor:pointer; box-shadow:0 4px 14px rgba(3,114,255,.4);">Save</button>
+          </div>
+        </sc-if>
+        <sc-if value="{{ editConfirmDelete }}" hint-placeholder-val="{{ false }}">
+          <div style="margin-top:10px; padding:14px; border-radius:14px; border:1.5px solid rgba(239,68,68,.4); background:rgba(239,68,68,.08);">
+            <div style="font-size:14px; font-weight:700; color:var(--bb-fg);">Delete this project?</div>
+            <div style="font-size:12.5px; font-weight:500; color:var(--bb-fg-soft); margin-top:3px;">This removes it everywhere it’s synced.</div>
+            <div style="display:flex; gap:10px; margin-top:12px;">
+              <button onclick="{{ cancelDeleteEdit }}" style="flex:1; height:44px; border-radius:13px; border:1.5px solid var(--bb-input-bd); background:transparent; color:var(--bb-fg); font-family:inherit; font-size:14px; font-weight:700; cursor:pointer;">Keep</button>
+              <button onclick="{{ confirmDeleteEdit }}" style="flex:1; height:44px; border-radius:13px; border:none; background:#ef4444; color:#fff; font-family:inherit; font-size:14px; font-weight:700; cursor:pointer; box-shadow:0 4px 14px rgba(239,68,68,.35);">Delete</button>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== Settings sheet ===== -->
+  <sc-if value="{{ settingsOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:150; display:flex; flex-direction:column; justify-content:flex-end; animation:bbFade .18s ease-out;">
+      <div onclick="{{ closeSettings }}" style="position:absolute; inset:0; background:var(--bb-scrim2);"></div>
+      <div style="position:relative; background:var(--bb-sheet); border-radius:24px 24px 0 0; padding:10px 22px calc(22px + env(safe-area-inset-bottom)); box-shadow:0 -10px 40px rgba(0,0,0,.3); animation:bbSheetUp .26s cubic-bezier(.16,1,.3,1);">
+        <div style="width:38px; height:5px; border-radius:3px; background:var(--bb-glass-bd); margin:0 auto 16px;"></div>
+        <div style="font-size:19px; font-weight:800; letter-spacing:-.01em; color:var(--bb-fg); margin-bottom:16px;">Settings</div>
+
+        <button onclick="{{ openPages }}" style="display:flex; align-items:center; gap:13px; width:100%; text-align:left; padding:14px 0; border:none; border-top:1px solid var(--bb-input-bd); background:transparent; cursor:pointer; font-family:inherit;">
+          <div style="width:40px;height:40px;border-radius:11px;display:grid;place-items:center;background:var(--bb-input-bg);color:var(--bb-accent);flex-shrink:0;"><i data-lucide="layout-list" style="width:20px;height:20px;"></i></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:700; color:var(--bb-fg);">Edit pages</div>
+            <div style="font-size:12px; font-weight:500; color:var(--bb-fg-soft); margin-top:1px;">See every page and drag to reorder</div>
+          </div>
+          <i data-lucide="chevron-right" style="width:20px;height:20px;color:var(--bb-fg-soft);flex-shrink:0;"></i>
+        </button>
+
+        <button onclick="{{ openRearrange }}" style="display:flex; align-items:center; gap:13px; width:100%; text-align:left; padding:14px 0; border:none; border-top:1px solid var(--bb-input-bd); background:transparent; cursor:pointer; font-family:inherit;">
+          <div style="width:40px;height:40px;border-radius:11px;display:grid;place-items:center;background:var(--bb-input-bg);color:var(--bb-accent);flex-shrink:0;"><i data-lucide="layout-grid" style="width:20px;height:20px;"></i></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:700; color:var(--bb-fg);">Rearrange projects</div>
+            <div style="font-size:12px; font-weight:500; color:var(--bb-fg-soft); margin-top:1px;">Move tiles, make folders, or remove projects</div>
+          </div>
+          <i data-lucide="chevron-right" style="width:20px;height:20px;color:var(--bb-fg-soft);flex-shrink:0;"></i>
+        </button>
+
+        <div style="display:flex; align-items:center; gap:13px; padding:14px 0; border-top:1px solid var(--bb-input-bd);">
+          <div style="width:40px;height:40px;border-radius:11px;display:grid;place-items:center;background:var(--bb-input-bg);color:var(--bb-accent);flex-shrink:0;"><i data-lucide="keyboard" style="width:20px;height:20px;"></i></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:700; color:var(--bb-fg);">Voice shortcut</div>
+            <div style="font-size:12px; font-weight:500; color:var(--bb-fg-soft); margin-top:1px;">Press to launch the mic from anywhere</div>
+          </div>
+          <span style="flex-shrink:0; font-size:12px; font-weight:700; color:var(--bb-fg); background:var(--bb-input-bg); border:1px solid var(--bb-input-bd); border-radius:9px; padding:7px 11px;">{{ shortcutLabel }}</span>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:13px; padding:14px 0; border-top:1px solid var(--bb-input-bd);">
+          <div style="width:40px;height:40px;border-radius:11px;display:grid;place-items:center;background:var(--bb-input-bg);color:var(--bb-accent);flex-shrink:0;"><i data-lucide="moon" style="width:20px;height:20px;"></i></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:700; color:var(--bb-fg);">Dark appearance</div>
+            <div style="font-size:12px; font-weight:500; color:var(--bb-fg-soft); margin-top:1px;">Best for side-panel use at night</div>
+          </div>
+          <button onclick="{{ toggleDark }}" aria-label="Toggle dark" style="position:relative; flex-shrink:0; width:46px; height:27px; border-radius:999px; border:none; cursor:pointer; background:{{ darkSwitchBg }}; transition:background .2s;"><span style="position:absolute; top:2.5px; left:{{ darkKnobX }}; width:22px; height:22px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:left .2s;"></span></button>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:13px; padding:14px 0; border-top:1px solid var(--bb-input-bd);">
+          <div style="width:40px;height:40px;border-radius:11px;display:grid;place-items:center;background:var(--bb-input-bg);color:var(--bb-accent);flex-shrink:0;"><i data-lucide="volume-2" style="width:20px;height:20px;"></i></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:700; color:var(--bb-fg);">Speak confirmations</div>
+            <div style="font-size:12px; font-weight:500; color:var(--bb-fg-soft); margin-top:1px;">Say which site is opening</div>
+          </div>
+          <button onclick="{{ toggleSpeak }}" aria-label="Toggle speak" style="position:relative; flex-shrink:0; width:46px; height:27px; border-radius:999px; border:none; cursor:pointer; background:{{ speakSwitchBg }}; transition:background .2s;"><span style="position:absolute; top:2.5px; left:{{ speakKnobX }}; width:22px; height:22px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:left .2s;"></span></button>
+        </div>
+
+        <div style="font-size:11.5px; font-weight:500; color:var(--bb-fg-soft); line-height:1.55; margin-top:14px; padding-top:14px; border-top:1px solid var(--bb-input-bd);">{{ count }} projects saved · synced to your Google Sheet. Say <b style="color:var(--bb-fg);">“open”</b> + a name, <b style="color:var(--bb-fg);">“next page”</b>, or <b style="color:var(--bb-fg);">“add project Claude”</b>.</div>
+        <button onclick="{{ closeSettings }}" style="width:100%; height:48px; margin-top:16px; border-radius:14px; border:none; background:var(--bb-accent); color:#fff; font-family:inherit; font-size:14px; font-weight:700; cursor:pointer;">Done</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== Pages manager (drag to reorder) ===== -->
+  <sc-if value="{{ pagesOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:152; display:flex; flex-direction:column; justify-content:flex-end; animation:bbFade .18s ease-out;">
+      <div onclick="{{ closePages }}" style="position:absolute; inset:0; background:var(--bb-scrim2);"></div>
+      <div style="position:relative; display:flex; flex-direction:column; max-height:82%; background:var(--bb-sheet); border-radius:24px 24px 0 0; padding:10px 18px calc(18px + env(safe-area-inset-bottom)); box-shadow:0 -10px 40px rgba(0,0,0,.3); animation:bbSheetUp .26s cubic-bezier(.16,1,.3,1);">
+        <div style="flex-shrink:0; width:38px; height:5px; border-radius:3px; background:var(--bb-glass-bd); margin:0 auto 14px;"></div>
+        <div style="flex-shrink:0; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:0 4px;">
+          <div style="min-width:0;">
+            <div style="font-size:19px; font-weight:800; letter-spacing:-.01em; color:var(--bb-fg);">Pages</div>
+            <div style="font-size:12.5px; font-weight:500; color:var(--bb-fg-soft); margin-top:2px;">Drag <i data-lucide="grip-vertical" style="width:13px;height:13px;vertical-align:-2px;"></i> to reorder · tap a page to jump there</div>
+          </div>
+          <button onclick="{{ addPage }}" style="flex-shrink:0; display:inline-flex; align-items:center; gap:6px; padding:8px 13px; border-radius:999px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); color:var(--bb-accent); cursor:pointer; font-family:inherit; font-size:12.5px; font-weight:700;"><i data-lucide="plus" style="width:15px;height:15px;"></i>Add</button>
+        </div>
+        <div class="bb-plist" style="flex:1; min-height:0; overflow-y:auto; margin-top:14px; padding:2px;">
+          <sc-for list="{{ pagesManager }}" as="pm" hint-placeholder-count="3">
+            <div class="bb-prow" data-pageidx="{{ pm.idx }}" style="display:flex; align-items:center; gap:8px; height:64px; margin-bottom:9px; padding:0 6px 0 4px; border-radius:15px; border:1.5px solid var(--bb-input-bd); background:var(--bb-input-bg); box-sizing:border-box; {{ pm.rowStyle }}">
+              <span class="bb-phandle" style="flex-shrink:0; width:30px; height:100%; display:grid; place-items:center; cursor:grab; touch-action:none; color:var(--bb-fg-soft);"><i data-lucide="grip-vertical" style="width:19px;height:19px;pointer-events:none;"></i></span>
+              <button onclick="{{ pm.jump }}" style="flex:1; min-width:0; height:100%; display:flex; align-items:center; gap:10px; border:none; background:transparent; cursor:pointer; font-family:inherit; padding:0; text-align:left;">
+                <span style="flex:1; min-width:0;">
+                  <span style="display:block; font-size:14px; font-weight:700; color:var(--bb-fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ pm.label }}</span>
+                  <span style="display:block; font-size:11.5px; font-weight:600; color:var(--bb-fg-soft); margin-top:2px;">{{ pm.count }}</span>
+                </span>
+                <span style="flex-shrink:0; display:inline-flex; align-items:center;">
+                  <sc-for list="{{ pm.mini }}" as="m" hint-placeholder-count="3">
+                    <span style="width:26px; height:26px; margin-left:-6px; border-radius:7px; flex-shrink:0; display:grid; place-items:center; background:var(--bb-tile); border:1px solid var(--bb-tile-bd); box-shadow:var(--bb-tile-sh); overflow:hidden;"><img class="bb-ico" data-src="{{ m.src }}" data-letter="{{ m.letter }}" style="width:17px;height:17px;display:block;"></span>
+                  </sc-for>
+                  <sc-if value="{{ pm.hasMore }}" hint-placeholder-val="{{ false }}">
+                    <span style="margin-left:5px; font-size:11px; font-weight:700; color:var(--bb-fg-soft);">{{ pm.more }}</span>
+                  </sc-if>
+                  <sc-if value="{{ pm.empty }}" hint-placeholder-val="{{ false }}">
+                    <span style="font-size:11.5px; font-weight:600; color:var(--bb-fg-soft);">empty</span>
+                  </sc-if>
+                </span>
+              </button>
+            </div>
+          </sc-for>
+        </div>
+        <button onclick="{{ closePages }}" style="flex-shrink:0; width:100%; height:48px; margin-top:12px; border-radius:14px; border:none; background:var(--bb-accent); color:#fff; font-family:inherit; font-size:14px; font-weight:700; cursor:pointer;">Done</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== Folder overlay ===== -->
+  <sc-if value="{{ folderOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:150; display:grid; place-items:center; padding:30px; animation:bbFade .18s ease-out;">
+      <div class="bb-folder-scrim" onclick="{{ closeFolder }}" style="position:absolute; inset:0; background:var(--bb-scrim);"></div>
+      <div class="bb-folder-card" style="position:relative; width:100%; max-width:330px; background:var(--bb-folder-panel); border:1px solid var(--bb-glass-bd); border-radius:26px; padding:22px 20px; -webkit-backdrop-filter:blur(24px); backdrop-filter:blur(24px); box-shadow:0 30px 70px rgba(0,0,0,.4); animation:bbPop .25s var(--bb-ease);">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:18px;">
+          <span style="width:46px;"></span>
+          <sc-if value="{{ folderEditing }}" hint-placeholder-val="{{ false }}">
+            <input type="text" value="{{ folderName }}" oninput="{{ onFolderName }}" placeholder="Folder name" spellcheck="false" style="flex:1; min-width:0; text-align:center; height:34px; padding:0 12px; border-radius:11px; border:1px solid var(--bb-glass-bd); background:var(--bb-search-bg); color:var(--bb-fg); font-family:inherit; font-size:16px; font-weight:800; letter-spacing:-.01em; outline:none;">
+          </sc-if>
+          <sc-if value="{{ folderNotEditing }}" hint-placeholder-val="{{ true }}">
+            <div style="flex:1; text-align:center; font-size:18px; font-weight:800; letter-spacing:-.01em; color:var(--bb-fg);">{{ folderName }}</div>
+          </sc-if>
+          <button onclick="{{ toggleFolderEdit }}" style="flex-shrink:0; width:46px; text-align:right; border:none; background:transparent; color:var(--bb-accent); font-family:inherit; font-size:13px; font-weight:700; cursor:pointer;">{{ folderEditLabel }}</button>
+        </div>
+        <sc-if value="{{ folderEditing }}" hint-placeholder-val="{{ false }}">
+          <div style="text-align:center; font-size:11.5px; font-weight:600; color:var(--bb-fg-soft); margin:-6px 0 14px; line-height:1.4;">Tap a project to edit it. Click the minus <b style="color:var(--bb-fg);">–</b> to remove it from a folder.</div>
+        </sc-if>
+        <div class="bb-folder-grid" style="display:grid; grid-template-columns:repeat(4,1fr); gap:18px 6px; justify-items:center;">
+          <sc-for list="{{ folderApps }}" as="fa" hint-placeholder-count="6">
+            <div class="bb-fapp" style="position:relative; display:flex; flex-direction:column; align-items:center; gap:6px;">
+              <sc-if value="{{ folderEditing }}" hint-placeholder-val="{{ false }}">
+                <button onclick="{{ fa.onRemove }}" aria-label="Take out" style="position:absolute; top:-7px; left:50%; margin-left:-21px; z-index:3; width:22px; height:22px; border-radius:50%; border:none; cursor:pointer; background:#fff; color:#15171f; box-shadow:0 1px 5px rgba(0,0,0,.4); display:grid; place-items:center;"><i data-lucide="minus" style="width:14px;height:14px;"></i></button>
+              </sc-if>
+              <button data-id="{{ fa.id }}" onclick="{{ fa.onTap }}" style="display:flex; flex-direction:column; align-items:center; gap:6px; border:none; background:transparent; cursor:pointer; font-family:inherit; padding:0;">
+                <span class="bb-tile {{ fa.tileClass }}" data-bg="{{ fa.grad }}" style="position:relative; width:58px; height:58px; border-radius:16px; display:grid; place-items:center; overflow:hidden; background:var(--bb-tile); box-shadow:var(--bb-tile-sh);"><img class="bb-tile-img bb-ico" data-src="{{ fa.icon }}" data-letter="{{ fa.letter }}" style="width:32px;height:32px;"><span class="bb-tile-letter" style="position:absolute; inset:0; place-items:center; font-size:24px; font-weight:800; color:#fff;">{{ fa.letter }}</span></span>
+                <span style="font-size:11.5px; font-weight:600; color:var(--bb-fg); max-width:74px; text-align:center; line-height:1.22; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; word-break:break-word;">{{ fa.name }}</span>
+              </button>
+            </div>
+          </sc-for>
+        </div>
+        <div style="width:100%; margin-top:20px; text-align:center; font-size:12px; font-weight:600; color:var(--bb-fg-soft);">{{ folderCount }} projects in this folder</div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== Voice disambiguation chooser ===== -->
+  <!-- Shown only when a spoken project name is genuinely ambiguous, so the wrong
+       project is never opened. The user taps the project, or says its number. -->
+  <sc-if value="{{ choosing }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; z-index:155; display:grid; place-items:center; padding:26px; animation:bbFade .18s ease-out;">
+      <div onclick="{{ cancelChoose }}" style="position:absolute; inset:0; background:var(--bb-scrim);"></div>
+      <div style="position:relative; width:100%; max-width:360px; background:var(--bb-folder-panel); border:1px solid var(--bb-glass-bd); border-radius:24px; padding:20px; -webkit-backdrop-filter:blur(24px); backdrop-filter:blur(24px); box-shadow:0 30px 70px rgba(0,0,0,.4); animation:bbPop .25s var(--bb-ease);">
+        <div style="font-size:17px; font-weight:800; letter-spacing:-.01em; color:var(--bb-fg); text-align:center;">Which one did you mean?</div>
+        <div style="font-size:12.5px; font-weight:600; color:var(--bb-fg-soft); text-align:center; margin-top:3px;">Heard “{{ choiceQuery }}” — tap a project or say its number.</div>
+        <div style="display:flex; flex-direction:column; gap:9px; margin-top:16px;">
+          <sc-for list="{{ choices }}" as="ch" hint-placeholder-count="3">
+            <button data-id="{{ ch.id }}" onclick="{{ ch.onTap }}" style="display:flex; align-items:center; gap:12px; width:100%; text-align:left; padding:11px 13px; border-radius:15px; border:1px solid var(--bb-glass-bd); background:var(--bb-glass); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); cursor:pointer; font-family:inherit;">
+              <span style="flex-shrink:0; width:24px; height:24px; border-radius:50%; display:grid; place-items:center; background:var(--bb-accent); color:#fff; font-size:12.5px; font-weight:800;">{{ ch.n }}</span>
+              <span style="width:38px; height:38px; border-radius:11px; flex-shrink:0; display:grid; place-items:center; background:var(--bb-tile); box-shadow:var(--bb-tile-sh); overflow:hidden;"><img class="bb-ico" data-src="{{ ch.icon }}" data-letter="{{ ch.letter }}" style="width:23px;height:23px;display:block;"></span>
+              <span style="flex:1; min-width:0;">
+                <span style="display:block; font-size:14px; font-weight:700; color:var(--bb-fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ ch.name }}</span>
+                <span style="display:block; font-size:11.5px; font-weight:500; color:var(--bb-fg-soft); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px;">{{ ch.host }}</span>
+              </span>
+              <i data-lucide="arrow-up-right" style="width:18px;height:18px;color:var(--bb-fg-soft);flex-shrink:0;"></i>
+            </button>
+          </sc-for>
+        </div>
+        <button onclick="{{ cancelChoose }}" style="width:100%; height:44px; margin-top:14px; border-radius:13px; border:1px solid var(--bb-glass-bd); background:var(--bb-glass); color:var(--bb-fg); font-family:inherit; font-size:13px; font-weight:700; cursor:pointer;">Cancel</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== Toast ===== -->
+  <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; left:50%; bottom:150px; transform:translateX(-50%); z-index:200; display:inline-flex; align-items:center; gap:9px; max-width:86%; padding:11px 18px; border-radius:14px; background:var(--bb-toast); color:#fff; font-size:13px; font-weight:600; box-shadow:0 16px 40px rgba(0,0,0,.34); animation:bbToast .22s ease-out; pointer-events:none;"><i data-lucide="{{ toastIcon }}" style="width:16px;height:16px;flex-shrink:0;"></i><span>{{ toast }}</span></div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:390,&quot;height&quot;:760}}">/* logic in lib/component-logic.js (loaded above) */</script>
+
+
+</body></html>
