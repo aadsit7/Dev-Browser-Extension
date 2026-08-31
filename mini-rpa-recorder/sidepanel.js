@@ -96,6 +96,9 @@
         return 'Clicked ' + (step.tagName || 'element') + " '" +
                trunc(step.fallbackText || step.ariaLabel || label, 46) + "'";
       case 'input':
+        /* Saying "Cleared" here would be a lie: the value was withheld on
+         * purpose, and the user needs to know they must type it at playback. */
+        if (a.type === 'password') return 'Password box ' + fieldName(step) + ' — value not saved, type it yourself';
         if (!step.value) return 'Cleared ' + fieldName(step);
         return 'Typed "' + trunc(step.value, 34) + '" into ' + fieldName(step);
       case 'change':

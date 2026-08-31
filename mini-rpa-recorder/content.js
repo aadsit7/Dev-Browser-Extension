@@ -504,6 +504,15 @@ if (window.__miniRpaLoaded) {
         }
         bringIntoView(el);
         highlight(el);
+        var isPassword = (step.attrs && step.attrs.type === 'password') ||
+                         String(el.type || '').toLowerCase() === 'password';
+        if (step.type === 'input' && isPassword && !step.value) {
+          /* The value was deliberately never recorded. Writing an empty string
+           * here would wipe a password the browser had filled in, so the field
+           * is only focused and the run reports that it needs the user. */
+          try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+          return { ok: true, needsUser: 'password' };
+        }
         try {
           if (step.type === 'click') clickElement(el);
           else if (step.type === 'input' || step.type === 'change') typeInto(el, step.value);

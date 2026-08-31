@@ -469,7 +469,7 @@ function endPlayback(text, kind) {
     var full = notes.length ? text + '\n' + notes.join('\n') : text;
     var level = kind || 'info';
     if (level !== 'error' && notes.some(function (n) {
-      return /not having an effect|No more matching|Stopped by you|same site only|opened a new tab/.test(n);
+      return /not having an effect|No more matching|Stopped by you|same site only|opened a new tab|password/.test(n);
     })) {
       level = 'warn';
     }
@@ -535,6 +535,11 @@ function runOneStep(step, index) {
         return sendToTab(resolved.tabId, { cmd: 'playStep', step: step }).then(function (out) {
           if (!out) return { ok: false, error: 'the page did not answer' };
           if (out.ok === false) return { ok: false, error: out.error };
+          if (out.needsUser === 'password') {
+            return addRunNote('Step ' + (index + 1) + ': the password box was focused but not filled in - ' +
+                              'passwords are never saved into a recording, so type it yourself.')
+              .then(function () { return { ok: true }; });
+          }
           return { ok: true };
         }).catch(function (e) {
           return { ok: false, error: errText(e) };
