@@ -958,6 +958,24 @@ function takeScreenshot() {
 
 /* --------------------------------------------------------------- messaging */
 
+function analyzePattern(pattern, text, prefix) {
+  if (!String(pattern || '').trim()) {
+    return Promise.resolve({ ok: false, error: 'No pattern to analyse.' });
+  }
+  return getActiveTab().then(function (tab) {
+    if (!tab || injectionBlockReason(tab.url)) {
+      return { ok: false, error: 'No usable page in the active tab.' };
+    }
+    return ensureContentScript(tab.id).then(function () {
+      return sendToTab(tab.id, { cmd: 'analyzePattern', pattern: pattern, text: text, prefix: prefix });
+    }).then(function (out) {
+      return out || { ok: false, error: 'The page did not answer.' };
+    }).catch(function (e) {
+      return { ok: false, error: errText(e) };
+    });
+  });
+}
+
 function countMatches(pattern) {
   if (!String(pattern || '').trim()) {
     return Promise.resolve({ ok: false, error: 'Enter a match pattern first.' });
@@ -1039,6 +1057,9 @@ function handleMessage(msg, sender) {
 
     case 'countMatches':
       return countMatches(msg.pattern);
+
+    case 'analyzePattern':
+      return analyzePattern(msg.pattern, msg.text, msg.prefix);
 
     case 'recordStep':
       return getLocal('mode').then(function (d) {
