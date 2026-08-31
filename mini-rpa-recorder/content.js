@@ -709,6 +709,30 @@ if (window.__miniRpaLoaded) {
       };
     }
 
+    /* A pass is only finished when whatever it opened has gone away again.
+     * Starting the next one while a dialog is still up means clicking into a
+     * covered page: the click lands on nothing, and by the time the dialog does
+     * appear it belongs to the wrong row.
+     *
+     * "Settled" is: no modal dialog is open, or the pattern still has usable
+     * matches anyway - which covers the case where the dialog IS the list. */
+    function isSettled(pattern) {
+      if (!openDialog()) return true;
+      try { return queryPattern(pattern).length > 0; } catch (e) { return true; }
+    }
+
+    function repeatSettle(pattern, timeoutMs) {
+      var end = Date.now() + (timeoutMs > 0 ? timeoutMs : 8000);
+      return (function attempt() {
+        if (aborted) return Promise.resolve({ ok: true, settled: true, aborted: true });
+        if (isSettled(pattern)) return Promise.resolve({ ok: true, settled: true });
+        if (Date.now() >= end) {
+          return Promise.resolve({ ok: true, settled: false, dialogOpen: !!openDialog() });
+        }
+        return sleep(200).then(attempt);
+      })();
+    }
+
     /* Lazy lists only reveal the next batch once you reach the bottom. */
     function repeatRescue(pattern) {
       try { window.scrollTo(0, document.documentElement.scrollHeight); } catch (e) { /* ignore */ }
@@ -758,6 +782,12 @@ if (window.__miniRpaLoaded) {
         try { sendResponse(repeatClickNext(msg.pattern, msg.handled, msg.useSignatures, msg.previous)); }
         catch (e) { sendResponse({ ok: false, error: e.message }); }
         return;
+      }
+      if (msg.cmd === 'repeatSettle') {
+        repeatSettle(msg.pattern, msg.timeoutMs).then(sendResponse).catch(function (e) {
+          sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
+        });
+        return true;
       }
       if (msg.cmd === 'repeatRescue') {
         aborted = false;

@@ -188,8 +188,13 @@
       pattern: derivePattern(step),
       maxRepeats: DEFAULT_MAX_REPEATS,
       delaySeconds: DEFAULT_DELAY_SECONDS,
-      groupSize: 1
+      groupSize: 1,
+      onMissing: 'stop'
     };
+  }
+
+  function onMissingOf(step) {
+    return (step.repeat && step.repeat.onMissing) === 'skip' ? 'skip' : 'stop';
   }
 
   function groupSizeOf(step) {
@@ -399,6 +404,26 @@
     groupInput.dataset.id = step.id;
     box.appendChild(makeField('Steps in each pass', groupInput));
 
+    var missing = document.createElement('select');
+    missing.dataset.fkey = step.id + ':missing';
+    missing.dataset.role = 'missing';
+    missing.dataset.id = step.id;
+    [['stop', 'Stop and tell me'], ['skip', 'Skip it and carry on']].forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      if (pair[0] === onMissingOf(step)) opt.selected = true;
+      missing.appendChild(opt);
+    });
+    box.appendChild(makeField('If a step in the pass is missing', missing));
+
+    var missingHint = document.createElement('p');
+    missingHint.className = 'hint';
+    missingHint.textContent = 'Stopping is usually what you want: a pass that did not finish means ' +
+      'the action did not happen either, and carrying on from there does the wrong thing to every ' +
+      'row after it. Choose skip only when a step is genuinely optional on some rows.';
+    box.appendChild(missingHint);
+
     var preview = document.createElement('div');
     preview.className = 'pass-preview';
     preview.dataset.passFor = step.id;
@@ -604,6 +629,14 @@
   el.list.addEventListener('change', function (e) {
     var target = e.target;
     if (!target || !target.dataset) return;
+    if (target.dataset.role === 'missing') {
+      var mStep = stepById(target.dataset.id);
+      if (!mStep || !mStep.repeat) return;
+      saveRepeat(mStep.id, Object.assign({}, mStep.repeat, {
+        enabled: true, onMissing: target.value === 'skip' ? 'skip' : 'stop'
+      }));
+      return;
+    }
     if (target.dataset.role !== 'toggle') return;
     var step = stepById(target.dataset.id);
     if (!step) return;
@@ -613,7 +646,8 @@
       var previous = step.repeat && String(step.repeat.pattern || '').trim() ? step.repeat : null;
       saveRepeat(step.id, previous
         ? { enabled: true, pattern: previous.pattern, maxRepeats: previous.maxRepeats,
-            delaySeconds: previous.delaySeconds, groupSize: previous.groupSize == null ? 1 : previous.groupSize }
+            delaySeconds: previous.delaySeconds, groupSize: previous.groupSize == null ? 1 : previous.groupSize,
+            onMissing: previous.onMissing === 'skip' ? 'skip' : 'stop' }
         : defaultRepeat(step));
     } else if (step.repeat) {
       /* Kept, not discarded: switching the toggle back on should not cost the
@@ -636,7 +670,8 @@
       pattern: current.pattern,
       maxRepeats: current.maxRepeats,
       delaySeconds: current.delaySeconds,
-      groupSize: current.groupSize == null ? 1 : current.groupSize
+      groupSize: current.groupSize == null ? 1 : current.groupSize,
+      onMissing: current.onMissing === 'skip' ? 'skip' : 'stop'
     };
 
     if (role === 'pattern') {
