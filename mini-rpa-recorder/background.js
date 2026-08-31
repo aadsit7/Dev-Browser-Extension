@@ -617,7 +617,17 @@ function startPlayback() {
     }
     var bad = null;
     steps.forEach(function (s, i) {
-      if (!bad && isRepeatOn(s) && /:nth-(of-type|child|last-child|last-of-type)\b/i.test(s.repeat.pattern)) {
+      if (bad || !s.repeat || !s.repeat.enabled) return;
+      var pattern = String(s.repeat.pattern || '').trim();
+      /* Without this the step would quietly fall through to a single ordinary
+       * click, which is not what a switched-on Repeat toggle promises. */
+      if (!pattern) {
+        bad = 'Step ' + (i + 1) + ' has Repeat switched on but no match pattern. ' +
+              'Type a pattern in that step\'s "Match pattern" box, or switch Repeat off ' +
+              'to click just the one element.';
+        return;
+      }
+      if (/:nth-(of-type|child|last-child|last-of-type)\b/i.test(pattern)) {
         bad = 'Step ' + (i + 1) + ' uses a position-based match pattern (nth-of-type / nth-child). ' +
               'Those cannot be used for repeats because the list shifts after every click - ' +
               'edit the pattern to use an attribute or :text("...") instead.';

@@ -544,9 +544,16 @@
     var step = stepById(target.dataset.id);
     if (!step) return;
     if (target.checked) {
-      saveRepeat(step.id, defaultRepeat(step));
-    } else {
-      saveRepeat(step.id, null);
+      /* Re-use what the user last tuned rather than re-deriving over the top
+       * of it; only a step that has never had a pattern gets a fresh one. */
+      var previous = step.repeat && String(step.repeat.pattern || '').trim() ? step.repeat : null;
+      saveRepeat(step.id, previous
+        ? { enabled: true, pattern: previous.pattern, maxRepeats: previous.maxRepeats, delaySeconds: previous.delaySeconds }
+        : defaultRepeat(step));
+    } else if (step.repeat) {
+      /* Kept, not discarded: switching the toggle back on should not cost the
+       * user the pattern they hand-tuned. Disabled config never runs. */
+      saveRepeat(step.id, Object.assign({}, step.repeat, { enabled: false }));
     }
   });
 
