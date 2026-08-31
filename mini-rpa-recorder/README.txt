@@ -241,6 +241,13 @@ boundaries:
   - Elements are found by selector first, then by tag plus visible text. A page
     that changes its wording between recording and playback can break a step.
 
+  - Passwords are never saved. Typing in a password box is recorded as a step so
+    the field still gets focused at playback, but the value itself is deliberately
+    not stored - a recording is plain JSON sitting in browser storage, and that is
+    no place for one. At playback the box is focused and left alone, and the run
+    summary tells you which step needs you to type it. A recorded login will
+    therefore always need you at the keyboard for that one field.
+
   - Many sites' terms of service restrict automated activity. Rapid bulk actions
     can get an account rate-limited, temporarily blocked, or permanently
     restricted, and that risk sits with you. This is why repeat mode has a hard

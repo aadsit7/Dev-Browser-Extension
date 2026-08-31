@@ -462,15 +462,18 @@ if (window.__miniRpaLoaded) {
     function pressKey(el, key) {
       try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
       var codes = { Enter: 13, Tab: 9, Escape: 27 };
+      var legacy = codes[key] || 0;
       ['keydown', 'keyup'].forEach(function (type) {
-        var ev = new KeyboardEvent(type, {
-          key: key, code: key, bubbles: true, cancelable: true, composed: true
-        });
-        try {
-          Object.defineProperty(ev, 'keyCode', { get: function () { return codes[key] || 0; } });
-          Object.defineProperty(ev, 'which', { get: function () { return codes[key] || 0; } });
-        } catch (e) { /* read-only in some engines - not fatal */ }
-        el.dispatchEvent(ev);
+        /* keyCode and which have to go through the constructor. Setting them as
+         * expandos afterwards looks right from here but never reaches the page:
+         * this script runs in an isolated world, and the page sees its own
+         * wrapper of the event without any properties added on this side. Plenty
+         * of sites still gate on keyCode === 13, so a 0 here means the Enter
+         * simply does nothing. */
+        el.dispatchEvent(new KeyboardEvent(type, {
+          key: key, code: key, keyCode: legacy, which: legacy, charCode: 0,
+          bubbles: true, cancelable: true, composed: true
+        }));
       });
     }
 
@@ -501,6 +504,15 @@ if (window.__miniRpaLoaded) {
         }
         bringIntoView(el);
         highlight(el);
+        var isPassword = (step.attrs && step.attrs.type === 'password') ||
+                         String(el.type || '').toLowerCase() === 'password';
+        if (step.type === 'input' && isPassword && !step.value) {
+          /* The value was deliberately never recorded. Writing an empty string
+           * here would wipe a password the browser had filled in, so the field
+           * is only focused and the run reports that it needs the user. */
+          try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+          return { ok: true, needsUser: 'password' };
+        }
         try {
           if (step.type === 'click') clickElement(el);
           else if (step.type === 'input' || step.type === 'change') typeInto(el, step.value);

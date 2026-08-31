@@ -469,7 +469,7 @@ function endPlayback(text, kind) {
     var full = notes.length ? text + '\n' + notes.join('\n') : text;
     var level = kind || 'info';
     if (level !== 'error' && notes.some(function (n) {
-      return /not having an effect|No more matching|Stopped by you|same site only|opened a new tab/.test(n);
+      return /not having an effect|No more matching|Stopped by you|same site only|opened a new tab|password/.test(n);
     })) {
       level = 'warn';
     }
@@ -535,6 +535,11 @@ function runOneStep(step, index) {
         return sendToTab(resolved.tabId, { cmd: 'playStep', step: step }).then(function (out) {
           if (!out) return { ok: false, error: 'the page did not answer' };
           if (out.ok === false) return { ok: false, error: out.error };
+          if (out.needsUser === 'password') {
+            return addRunNote('Step ' + (index + 1) + ': the password box was focused but not filled in - ' +
+                              'passwords are never saved into a recording, so type it yourself.')
+              .then(function () { return { ok: true }; });
+          }
           return { ok: true };
         }).catch(function (e) {
           return { ok: false, error: errText(e) };
@@ -617,7 +622,17 @@ function startPlayback() {
     }
     var bad = null;
     steps.forEach(function (s, i) {
-      if (!bad && isRepeatOn(s) && /:nth-(of-type|child|last-child|last-of-type)\b/i.test(s.repeat.pattern)) {
+      if (bad || !s.repeat || !s.repeat.enabled) return;
+      var pattern = String(s.repeat.pattern || '').trim();
+      /* Without this the step would quietly fall through to a single ordinary
+       * click, which is not what a switched-on Repeat toggle promises. */
+      if (!pattern) {
+        bad = 'Step ' + (i + 1) + ' has Repeat switched on but no match pattern. ' +
+              'Type a pattern in that step\'s "Match pattern" box, or switch Repeat off ' +
+              'to click just the one element.';
+        return;
+      }
+      if (/:nth-(of-type|child|last-child|last-of-type)\b/i.test(pattern)) {
         bad = 'Step ' + (i + 1) + ' uses a position-based match pattern (nth-of-type / nth-child). ' +
               'Those cannot be used for repeats because the list shifts after every click - ' +
               'edit the pattern to use an attribute or :text("...") instead.';
