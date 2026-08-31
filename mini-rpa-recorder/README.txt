@@ -79,6 +79,18 @@ Every click step in the list has a "Repeat on every matching element" toggle.
 Switch it on and the step stops being "click that one button" and becomes "keep
 clicking every button that matches this pattern".
 
+A pass can be more than one click. On a lot of pages the row button opens a
+dialog, and the real unit of work is "click the row, confirm in the dialog that
+pops up, press next, scroll". Those steps are already in your recording, so the
+"Steps in each pass" box says how many of them belong to one turn of the loop:
+this step plus the ones after it. Set it to 1 and you get a plain repeated
+click. Set it to 4 and each pass runs all four steps before finding the next
+matching element. The panel lists the exact steps a pass will run underneath the
+box, so you can see what you have selected rather than counting in your head.
+
+Steps inside a pass run only inside it - they are not replayed again afterwards
+- and a pass cannot contain another repeating step.
+
 The pattern is deliberately NOT the selector used for the single click. Selectors
 that count positions (nth-of-type, nth-child) break the moment the first click
 removes a row and everything below it shifts up, so they are not allowed in a
@@ -123,28 +135,53 @@ WORKED EXAMPLE
      pattern is too narrow. If it says 200, it is too broad - widen or narrow
      the pattern by hand in the "Match pattern" box.
   5. Set "Max repeats" (default 25) and "Delay between repeats" in seconds
-     (default 2.0).
+     (default 2.0). If confirming the action needs a dialog or a second click,
+     set "Steps in each pass" to cover those steps too and check the list of
+     steps shown underneath matches what one turn of the loop should do.
   6. Press Play. The status line shows a live counter:
 
          Repeat 12 of up to 25
 
 HOW THE LOOP ACTUALLY RUNS
 
-Each round it re-queries the live page from scratch. It never holds on to an
-element it found last time, because after a click the list has usually
-re-rendered and any saved reference is stale. It then takes the first match,
-scrolls it into view, outlines it, clicks it, waits your delay, and goes round
-again.
+Each pass re-queries the live page from scratch. It never holds on to an element
+it found last time, because after a click the list has usually re-rendered and
+any saved reference is stale. It picks the next matching element, scrolls it
+into view, outlines it, clicks it, runs the rest of the steps in the pass, waits
+your delay, and goes round again.
+
+Picking "the next" element depends on whether the matches can be told apart. If
+every match has its own aria-label, id, data-testid or name, the loop remembers
+which ones it has already handled and moves on to the next. That matters because
+plenty of pages leave the button exactly where it was and only change its
+wording - "Connect" becomes "Pending" - so a loop that just took the first match
+every time would sit on row one forever. Where the matches are indistinguishable
+(five identical "Dismiss" buttons, say), it takes the first match each round and
+relies on the pool shrinking instead.
+
+While a dialog is open it owns the interaction: steps are matched inside it
+first, and anything the page has marked hidden or inert behind it is not treated
+as clickable. That stops a pass clicking a background button that happens to
+share its wording with the one in the dialog.
+
+If a step in the pass cannot be found within five seconds it is skipped and the
+pass carries on - some rows genuinely skip the dialog - and the count of skipped
+steps is reported at the end.
 
 The loop stops when any of these happens:
 
   - no elements match any more;
   - the max-repeats limit is reached;
   - you press Stop Playback;
-  - STALL GUARD: the number of matching elements fails to go down for three
-    rounds in a row. It reports "Clicks are not having an effect - stopped
-    after N rounds." This is what stops it spinning forever on a page that
-    quietly ignores simulated clicks.
+  - STALL GUARD: the clicks are having no effect. Where matches are
+    indistinguishable that shows up as the number of matching elements failing
+    to go down for three rounds; where they can be told apart it shows up as the
+    element clicked last round being completely unchanged three rounds running.
+    Either way it reports "Clicks are not having an effect - stopped after N
+    rounds." This is what stops it spinning forever on a page that quietly
+    ignores simulated clicks.
+  - the follow-on steps in a pass stop being found altogether, which means the
+    page is no longer behaving the way it did when you recorded.
 
 LAZY LOADING
 

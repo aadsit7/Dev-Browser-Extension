@@ -13,6 +13,10 @@ var DEFAULT_DELAY_SECONDS = 2.0;
 var GAP_MIN_MS = 250;
 var GAP_MAX_MS = 3000;
 var TAB_LOAD_TIMEOUT_MS = 20000;
+var STALL_LIMIT = 3;           /* rounds with no progress before giving up */
+var FOLLOWER_TIMEOUT_MS = 5000; /* per follow-on step inside a repeat pass */
+var RESCUE_LIMIT = 3;          /* scroll-to-load attempts per repeat step */
+var DEFAULT_GROUP_SIZE = 1;
 
 var MATCH_LEVEL_TEXT = {
   exact: 'exact URL match',
@@ -126,8 +130,16 @@ function normalizeRepeat(repeat) {
     pattern: String(r.pattern || '').trim(),
     maxRepeats: maxRepeats,
     delayMs: delayMs,
-    delaySeconds: delayMs / 1000
+    delaySeconds: delayMs / 1000,
+    /* How many steps make up one pass: this step plus the ones after it, so a
+     * pass can cover "click the row, accept in the dialog, press next". */
+    groupSize: Math.round(clamp(r.groupSize == null ? DEFAULT_GROUP_SIZE : r.groupSize, 1, 50))
   };
+}
+
+function groupSizeFor(step, index, total) {
+  var wanted = normalizeRepeat(step.repeat).groupSize;
+  return Math.max(1, Math.min(wanted, total - index));
 }
 
 function isRepeatOn(step) {
@@ -518,21 +530,9 @@ function runOneStep(step, index) {
     }).then(function () {
       if (step.type === 'switchTab') return { ok: true };
       return ensureContentScript(resolved.tabId).then(function () {
-        if (isRepeatOn(step)) {
-          var cfg = normalizeRepeat(step.repeat);
-          return setPlay({ repeatMax: cfg.maxRepeats, repeatCount: 0, repeatNote: '' }).then(function () {
-            return sendToTab(resolved.tabId, { cmd: 'runRepeat', step: step, config: cfg });
-          }).then(function (out) {
-            if (!out) return { ok: false, error: 'the page did not answer the repeat request' };
-            if (out.ok === false) return { ok: false, error: out.error };
-            return addRunNote('Step ' + (index + 1) + ' (repeat): ' + out.reason)
-              .then(function () { return notice('Step ' + (index + 1) + ' (repeat): ' + out.reason, 'info'); })
-              .then(function () { return { ok: true }; });
-          }).catch(function (e) {
-            return { ok: false, error: 'the repeat loop was cut short - ' + errText(e) };
-          });
-        }
-        return sendToTab(resolved.tabId, { cmd: 'playStep', step: step }).then(function (out) {
+        return sendToTab(resolved.tabId, {
+          cmd: 'playStep', step: step, timeoutMs: step.__passFollower ? FOLLOWER_TIMEOUT_MS : 0
+        }).then(function (out) {
           if (!out) return { ok: false, error: 'the page did not answer' };
           if (out.ok === false) return { ok: false, error: out.error };
           if (out.needsUser === 'password') {
@@ -547,6 +547,189 @@ function runOneStep(step, index) {
       });
     });
   });
+}
+
+/* One step of a repeat pass, run the ordinary way but with any repeat setting
+ * stripped so a pass can never nest inside itself. */
+function runFollowerStep(step, index) {
+  if (step.type === 'screenshot') return Promise.resolve({ ok: true, skipped: true });
+  return runOneStep(Object.assign({}, step, { repeat: null, __passFollower: true }), index)
+    .catch(function (e) { return { ok: false, error: errText(e) }; });
+}
+
+/* Repeat mode drives from here rather than from the page, because a pass can
+ * span several recorded steps - click a row, accept in the dialog it opens,
+ * press next - and only this side knows what those steps are. The page is
+ * asked for one thing at a time: which element to click next, and whether
+ * scrolling revealed any more. Element references are never held across
+ * rounds; every round re-queries the live page. */
+function runRepeatPass(step, index, steps, tabId) {
+  var cfg = normalizeRepeat(step.repeat);
+  var groupSize = groupSizeFor(step, index, steps.length);
+  var followers = steps.slice(index + 1, index + groupSize);
+
+  var rounds = 0;
+  var rescues = 0;
+  var stall = 0;
+  var lastCount = -1;
+  var handled = [];
+  var useSignatures = false;
+  var previous = null;      /* what was clicked last round, and how it looked */
+  var noEffect = 0;
+  var missedPasses = 0;
+  var skippedFollowers = 0;
+
+  function finish(reason) {
+    var text = 'Step ' + (index + 1) + ' (repeat): ' + reason;
+    if (skippedFollowers) {
+      text += ' ' + skippedFollowers + ' follow-on step(s) were skipped because the element ' +
+              'was not on the page that round.';
+    }
+    return addRunNote(text)
+      .then(function () { return notice(text, 'info'); })
+      .then(function () { return { ok: true }; });
+  }
+
+  function stillRunning() {
+    return getPlay().then(function (p) { return !!(p && p.running); });
+  }
+
+  function ask(message) {
+    return sendToTab(tabId, message).catch(function (e) {
+      return { ok: false, error: errText(e) };
+    });
+  }
+
+  /* Whether the matches can be told apart decides how the loop knows it is
+   * making progress: distinguishable elements are tracked individually, and
+   * anything else falls back to watching the pool shrink. */
+  function probe() {
+    return ask({ cmd: 'repeatProbe', pattern: cfg.pattern }).then(function (out) {
+      if (!out || out.ok === false) {
+        return { ok: false, error: (out && out.error) || 'the page did not answer' };
+      }
+      useSignatures = !!out.distinct;
+      return { ok: true };
+    });
+  }
+
+  function runFollowers(i) {
+    if (i >= followers.length) return Promise.resolve({ ok: true });
+    return stillRunning().then(function (running) {
+      if (!running) return { ok: true, stopped: true };
+      var follower = followers[i];
+      return runFollowerStep(follower, index + 1 + i).then(function (res) {
+        if (res && res.ok === false) {
+          /* A dialog that does not appear on every row should not end the run;
+           * the pass carries on and the skip is reported at the end. */
+          skippedFollowers += 1;
+          return { ok: true, missed: true };
+        }
+        return { ok: true, missed: false };
+      }).then(function (res) {
+        if (res.stopped) return res;
+        return runFollowers(i + 1).then(function (rest) {
+          return { ok: true, stopped: rest.stopped, missed: res.missed || rest.missed };
+        });
+      });
+    });
+  }
+
+  function round() {
+    return stillRunning().then(function (running) {
+      if (!running) return finish('Stopped by you after ' + rounds + ' pass(es).');
+      if (rounds >= cfg.maxRepeats) {
+        return finish('Reached the limit of ' + cfg.maxRepeats + ' repeats.');
+      }
+
+      return ask({
+        cmd: 'repeatClickNext', pattern: cfg.pattern,
+        handled: handled, useSignatures: useSignatures, previous: previous
+      }).then(function (out) {
+        if (!out || out.ok === false) {
+          return { ok: false, error: (out && out.error) || 'the page did not answer' };
+        }
+
+        /* Two ways to notice that the page is simply ignoring the clicks.
+         * With distinguishable elements the pool legitimately stays the same
+         * size (a handled row is still there, just changed), so the signal is
+         * that the element clicked last round has not changed one bit. This is
+         * checked before the "nothing left" branch, because having clicked
+         * every match and changed none of them is a page ignoring clicks, not
+         * a list that ran out. */
+        if (useSignatures) {
+          if (out.previousUnchanged) noEffect += 1;
+          else noEffect = 0;
+          if (noEffect >= STALL_LIMIT) {
+            return finish('Clicks are not having an effect — stopped after ' + rounds + ' rounds.');
+          }
+        }
+
+        if (!out.clicked) {
+          if (rescues >= RESCUE_LIMIT) {
+            return finish('No more matching elements (after ' + rescues +
+                          ' scroll-to-load attempts) - stopped after ' + rounds + ' pass(es).');
+          }
+          rescues += 1;
+          return setPlay({
+            repeatNote: 'nothing left in view - scrolling down to load more (attempt ' +
+                        rescues + ' of ' + RESCUE_LIMIT + ')'
+          }).then(function () {
+            return ask({ cmd: 'repeatRescue', pattern: cfg.pattern });
+          }).then(function () {
+            lastCount = -1;
+            stall = 0;
+            return round();
+          });
+        }
+
+        /* Without distinguishable elements, a pool that never shrinks is the
+         * only evidence available. */
+        if (!useSignatures) {
+          if (lastCount >= 0 && out.countBefore >= lastCount) stall += 1;
+          else stall = 0;
+          lastCount = out.countBefore;
+          if (stall >= STALL_LIMIT) {
+            return finish('Clicks are not having an effect — stopped after ' + rounds + ' rounds.');
+          }
+        }
+
+        rounds += 1;
+        if (out.signature) handled.push(out.signature);
+        previous = out.signature ? { signature: out.signature, state: out.state } : null;
+
+        return setPlay({
+          repeatCount: rounds, repeatMax: cfg.maxRepeats,
+          repeatRemaining: Math.max(0, out.countBefore - 1), repeatNote: ''
+        }).then(function () {
+          return runFollowers(0);
+        }).then(function (res) {
+          if (res.stopped) return finish('Stopped by you after ' + rounds + ' pass(es).');
+          if (followers.length) {
+            /* Every follow-on step missing, pass after pass, means the flow has
+             * broken rather than that one row was unusual. */
+            if (res.missed && skippedFollowers >= followers.length * STALL_LIMIT) missedPasses += 1;
+            else if (!res.missed) missedPasses = 0;
+            if (missedPasses >= STALL_LIMIT) {
+              return finish('The follow-on steps stopped being found — the page is no longer ' +
+                            'behaving the way it did when you recorded. Stopped after ' + rounds + ' passes.');
+            }
+          }
+          return sleepInterruptible(cfg.delayMs).then(function (running2) {
+            if (!running2) return finish('Stopped by you after ' + rounds + ' pass(es).');
+            return round();
+          });
+        });
+      });
+    });
+  }
+
+  return setPlay({ repeatMax: cfg.maxRepeats, repeatCount: 0, repeatNote: '' })
+    .then(probe)
+    .then(function (p) {
+      if (p.ok === false) return p;
+      return round();
+    });
 }
 
 function playLoop() {
@@ -575,6 +758,20 @@ function playLoop() {
         }).then(function () {
           /* Screenshots are reference images, not actions. */
           if (step.type === 'screenshot') return { ok: true, skipped: true };
+          if (isRepeatOn(step)) {
+            /* The pass owns this step and the ones it loops over, so it brings
+             * the tab forward itself and then drives the whole group. */
+            return resolveTab(step.url, step.title).then(function (resolved) {
+              return noteMatchLevel(step, i, resolved.level)
+                .then(function () {
+                  return setPlay({ matchLevel: MATCH_LEVEL_TEXT[resolved.level] || resolved.level });
+                })
+                .then(function () { return ensureContentScript(resolved.tabId); })
+                .then(function () { return runRepeatPass(step, i, steps, resolved.tabId); });
+            }).catch(function (e) {
+              return { ok: false, error: errText(e) };
+            });
+          }
           return runOneStep(step, i).catch(function (e) {
             return { ok: false, error: errText(e) };
           });
@@ -584,10 +781,14 @@ function playLoop() {
               'Stopped at step ' + (i + 1) + ' of ' + steps.length + ' (' + shortLabel(step) + ') on tab "' +
               (step.title || hostOf(step.url)) + '": ' + result.error + '.', 'error');
           }
-          return setPlay({ doneIndex: i }).then(function () {
-            var following = steps[i + 1];
+          /* A repeat pass consumes the steps it loops over, so they must not
+           * then run again on their own afterwards. */
+          var last = isRepeatOn(step) ? i + groupSizeFor(step, i, steps.length) - 1 : i;
+          return setPlay({ doneIndex: last }).then(function () {
+            var following = steps[last + 1];
             if (!following) return next();
-            var gap = clamp((following.timestamp || 0) - (step.timestamp || 0), GAP_MIN_MS, GAP_MAX_MS);
+            var from = steps[last] || step;
+            var gap = clamp((following.timestamp || 0) - (from.timestamp || 0), GAP_MIN_MS, GAP_MAX_MS);
             return sleepInterruptible(gap).then(function (stillRunning) {
               if (!stillRunning) return endPlayback('Playback stopped.', 'info');
               return next();
@@ -636,6 +837,18 @@ function startPlayback() {
         bad = 'Step ' + (i + 1) + ' uses a position-based match pattern (nth-of-type / nth-child). ' +
               'Those cannot be used for repeats because the list shifts after every click - ' +
               'edit the pattern to use an attribute or :text("...") instead.';
+        return;
+      }
+      /* Two overlapping passes would mean one loop running inside another,
+       * which is not something this tool does. */
+      var last = i + groupSizeFor(s, i, steps.length) - 1;
+      for (var j = i + 1; j <= last; j++) {
+        if (steps[j] && steps[j].repeat && steps[j].repeat.enabled) {
+          bad = 'Step ' + (i + 1) + ' repeats a pass that runs through step ' + (last + 1) +
+                ', but step ' + (j + 1) + ' has Repeat switched on too. Switch Repeat off on ' +
+                'step ' + (j + 1) + ', or shorten the pass on step ' + (i + 1) + '.';
+          return;
+        }
       }
     });
     if (bad) {
