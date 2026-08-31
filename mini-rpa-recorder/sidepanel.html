@@ -10,7 +10,7 @@
 
 <header class="topbar">
   <h1 class="title">Mini RPA Recorder</h1>
-  <div id="statusLine" class="status status-idle">
+  <div id="statusLine" class="status status-idle" role="status" aria-live="polite">
     <span id="statusMode" class="status-mode">Idle</span>
     <span id="statusDetail" class="status-detail"></span>
   </div>
@@ -32,7 +32,7 @@
   </div>
 </section>
 
-<div id="notice" class="notice" hidden></div>
+<div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
 <div id="skipped" class="notice notice-warn" hidden></div>
 <div id="sizeWarn" class="notice notice-warn" hidden></div>
 
@@ -50,7 +50,7 @@
     <strong>action set</strong> — then press <strong>Loop</strong> on the set to run it once for
     every matching element on the page.
   </p>
-  <ol id="stepList" class="step-list"></ol>
+  <ol id="stepList" class="step-list" aria-label="Recorded steps"></ol>
 </section>
 
 <footer class="foot">

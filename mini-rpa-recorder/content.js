@@ -556,10 +556,16 @@ if (window.__miniRpaLoaded) {
       return waitForElement(step, wait).then(function (el) {
         if (aborted) return { ok: true, stopped: true };
         if (!el) {
+          var frames = document.querySelectorAll('iframe, frame').length;
           return {
             ok: false,
             error: 'could not find ' + describeTarget(step) +
-                   ' after waiting ' + Math.round(wait / 1000) + ' seconds'
+                   ' after waiting ' + Math.round(wait / 1000) + ' seconds' +
+                   /* Otherwise this failure is a mystery on a page that keeps
+                    * its controls in an embedded frame. */
+                   (frames ? ' — note this page has ' + frames + ' embedded frame' +
+                             (frames === 1 ? '' : 's') + ', and the recorder only reaches the ' +
+                             'main page, so a control inside one cannot be found' : '')
           };
         }
         bringIntoView(el);
