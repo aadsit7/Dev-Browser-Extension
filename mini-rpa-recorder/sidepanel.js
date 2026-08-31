@@ -182,6 +182,53 @@
     return tag;
   }
 
+  /* A pattern built from an attribute alone cannot tell a row that still needs
+   * doing from one that has already been actioned - plenty of pages leave the
+   * attribute untouched and change only the wording. So once a pattern exists,
+   * it is checked against the live page and pinned to the recorded wording
+   * when the evidence says that wording identifies a state rather than a
+   * single row. Pinning needs at least two elements showing it: one alone
+   * means the wording varies per row and pinning would trap the loop. */
+  function refinePattern(stepId, basePattern, wantText) {
+    var text = squash(wantText);
+    if (!text || text.length > 60) return;
+    if (/:text\(/.test(basePattern)) return;
+    var prefix = stablePrefix(text);
+    ask({ cmd: 'analyzePattern', pattern: basePattern, text: text, prefix: prefix })
+      .then(function (res) {
+      if (!res || res.ok === false) return;
+      /* Exact wording first. Where the wording carries the row's own name, the
+       * leading words still say which state it is in, so fall back to those.
+       * Either way it takes two or more elements to be a state rather than a
+       * single row - pinning to one would leave the loop with nothing to do. */
+      var pin = null;
+      if (res.withText >= 2) pin = ':text("' + quote(text) + '")';
+      else if (prefix && prefix !== text && res.withPrefix >= 2) {
+        pin = ':text^("' + quote(prefix) + '")';
+      }
+      if (!pin) return;
+      var others = res.withText >= 2 ? res.others : res.othersPrefix;
+      var shown = res.withText >= 2 ? text : prefix;
+      var step = stepById(stepId);
+      if (!step || !step.repeat || !step.repeat.enabled) return;
+      if (squash(step.repeat.pattern) !== squash(basePattern)) return;   /* user edited it */
+      var pinned = basePattern + pin;
+      step.repeat = Object.assign({}, step.repeat, { pattern: pinned });
+      saveRepeat(stepId, step.repeat);
+      /* The box has to show what is actually going to run - a re-render is
+       * skipped here because only a field value changed, so update it directly. */
+      var box = el.list.querySelector('[data-fkey="' + stepId + ':pattern"]');
+      if (box && box !== document.activeElement) box.value = pinned;
+      refreshCount(stepId, pinned);
+      if (others > 0) {
+        showLocalNotice('Narrowed the match pattern for step "' + trunc(describe(step), 40) +
+          '" to elements showing "' + shown + '". The page has ' + others +
+          ' other element(s) with the same attribute in a different state, and clicking those ' +
+          'would do something else entirely.', 'warn');
+      }
+    });
+  }
+
   function defaultRepeat(step) {
     return {
       enabled: true,
@@ -356,9 +403,14 @@
     var code = document.createElement('code');
     code.textContent = 'tag:text("exact words")';
     hint.appendChild(code);
+    hint.appendChild(document.createTextNode(' matches by visible text, and '));
+    var code2 = document.createElement('code');
+    code2.textContent = ':text^("leading words")';
+    hint.appendChild(code2);
     hint.appendChild(document.createTextNode(
-      ' matches by visible text instead. Position-based patterns (nth-of-type, nth-child) ' +
-      'are not allowed here — the list shifts after every click.'));
+      ' by the start of it — useful because the wording is often what says whether a row ' +
+      'still needs doing. Position-based patterns (nth-of-type, nth-child) are not allowed ' +
+      'here — the list shifts after every click.'));
     box.appendChild(hint);
 
     var twoUp = document.createElement('div');
@@ -644,11 +696,18 @@
       /* Re-use what the user last tuned rather than re-deriving over the top
        * of it; only a step that has never had a pattern gets a fresh one. */
       var previous = step.repeat && String(step.repeat.pattern || '').trim() ? step.repeat : null;
-      saveRepeat(step.id, previous
-        ? { enabled: true, pattern: previous.pattern, maxRepeats: previous.maxRepeats,
-            delaySeconds: previous.delaySeconds, groupSize: previous.groupSize == null ? 1 : previous.groupSize,
-            onMissing: previous.onMissing === 'skip' ? 'skip' : 'stop' }
-        : defaultRepeat(step));
+      if (previous) {
+        saveRepeat(step.id, {
+          enabled: true, pattern: previous.pattern, maxRepeats: previous.maxRepeats,
+          delaySeconds: previous.delaySeconds,
+          groupSize: previous.groupSize == null ? 1 : previous.groupSize,
+          onMissing: previous.onMissing === 'skip' ? 'skip' : 'stop'
+        });
+      } else {
+        var fresh = defaultRepeat(step);
+        saveRepeat(step.id, fresh);
+        refinePattern(step.id, fresh.pattern, step.fallbackText);
+      }
     } else if (step.repeat) {
       /* Kept, not discarded: switching the toggle back on should not cost the
        * user the pattern they hand-tuned. Disabled config never runs. */

@@ -112,7 +112,36 @@ whatever stable handle the element has, preferring, in order:
 
          button:text("Dismiss")
 
-     (:text("...") is understood by this extension; it is not standard CSS.)
+     (:text("...") is understood by this extension; it is not standard CSS.
+     There is also :text^("leading words") for wording that starts the same
+     way but ends differently on every row.)
+
+PINNING THE WORDING - WHY THE PATTERN OFTEN GAINS A :text() PART
+
+A list you are part-way through holds rows in more than one state: some still to
+do, some already actioned. Plenty of pages leave the underlying attribute
+untouched between the two and change only the wording on the button - the label
+still says "Invite Person 4 to connect" long after the button itself has become
+"Pending". An attribute pattern alone cannot tell those apart, and clicking one
+that has already been actioned usually does something quite different: undo it,
+withdraw it, open a menu you did not want.
+
+So when Repeat is switched on, the pattern is checked against the page in front
+of you and pinned to the wording that marks an actionable row:
+
+    button[aria-label^="Invite"]              becomes
+    button[aria-label^="Invite"]:text("Connect")
+
+The panel says when it has done this and how many elements it excluded. Two or
+more elements have to be showing that wording before it will pin - one alone
+means the wording belongs to that row rather than to a state, and pinning it
+would leave the loop with a single element and nothing to move on to. Where the
+wording carries the row's own name ("Connect with Dana Ellis"), the leading
+words are pinned instead, with :text^("Connect").
+
+This is also why the "currently matches N elements" read-out is worth a look:
+after pinning it counts the rows that still need doing, not every row on the
+page.
 
 Randomised or hashed class names are ignored on purpose - many sites regenerate
 them on every deploy, so a pattern built on them would stop working without
@@ -131,9 +160,11 @@ WORKED EXAMPLE
 
      This counts the pattern against the page in the active tab right now, and
      it re-counts whenever you edit the pattern or switch to a different page.
-     Check the number looks right BEFORE you play anything. If it says 0, the
-     pattern is too narrow. If it says 200, it is too broad - widen or narrow
-     the pattern by hand in the "Match pattern" box.
+     Check the number looks right BEFORE you play anything, and check it against
+     the rows that still need doing rather than every row you can see. If it
+     says 0, the pattern is too narrow. If it is higher than the number of rows
+     still to do, it is too broad and is probably picking up rows you have
+     already actioned - widen or narrow it by hand in the "Match pattern" box.
   5. Set "Max repeats" (default 25) and "Delay between repeats" in seconds
      (default 2.0). If confirming the action needs a dialog or a second click,
      set "Steps in each pass" to cover those steps too and check the list of

@@ -593,14 +593,19 @@ if (window.__miniRpaLoaded) {
     }
 
     /* Pattern language: a plain CSS selector, optionally ending with
-     * :text("exact visible text") which filters matches by trimmed text. */
+     *   :text("exact visible text")   - matches that wording exactly
+     *   :text^("leading words")       - matches wording that starts with it
+     * Both exist because the wording is often what says whether a row still
+     * needs doing, and some pages put the row's own name in it. */
     function parsePattern(pattern) {
       var raw = String(pattern == null ? '' : pattern).trim();
-      var m = /:text\(\s*(["'])([\s\S]*?)\1\s*\)\s*$/.exec(raw);
+      var m = /:text(\^)?\(\s*(["'])([\s\S]*?)\2\s*\)\s*$/.exec(raw);
       if (m) {
-        return { css: raw.slice(0, m.index).trim() || '*', text: m[2] };
+        var css = raw.slice(0, m.index).trim() || '*';
+        if (m[1]) return { css: css, text: null, textPrefix: m[3] };
+        return { css: css, text: m[3], textPrefix: null };
       }
-      return { css: raw, text: null };
+      return { css: raw, text: null, textPrefix: null };
     }
 
     function queryPattern(pattern) {
@@ -616,6 +621,11 @@ if (window.__miniRpaLoaded) {
       if (parsed.text !== null) {
         var want = squash(parsed.text).toLowerCase();
         nodes = nodes.filter(function (n) { return visibleText(n).toLowerCase() === want; });
+      } else if (parsed.textPrefix !== null) {
+        var head = squash(parsed.textPrefix).toLowerCase();
+        nodes = nodes.filter(function (n) {
+          return visibleText(n).toLowerCase().indexOf(head) === 0;
+        });
       }
       return nodes.filter(isUsable);
     }
@@ -645,6 +655,30 @@ if (window.__miniRpaLoaded) {
         seen[sig] = true;
       }
       return true;
+    }
+
+    /* How a candidate pattern actually lands on the live page: how many it
+     * matches, and how many of those are showing the same wording as the
+     * element that was recorded. A list part-way through a job holds rows in
+     * more than one state - some still to do, some already actioned - and an
+     * attribute hook alone does not tell them apart. */
+    function analyzePattern(pattern, text, prefix) {
+      var nodes = queryPattern(pattern);
+      var want = squash(text).toLowerCase();
+      var head = squash(prefix || '').toLowerCase();
+      var withText = 0;
+      var withPrefix = 0;
+      for (var i = 0; i < nodes.length; i++) {
+        var t = visibleText(nodes[i]).toLowerCase();
+        if (t === want) withText += 1;
+        if (head && t.indexOf(head) === 0) withPrefix += 1;
+      }
+      return {
+        ok: true, count: nodes.length,
+        withText: withText, withPrefix: withPrefix,
+        others: nodes.length - withText,
+        othersPrefix: nodes.length - withPrefix
+      };
     }
 
     function repeatProbe(pattern) {
@@ -755,6 +789,11 @@ if (window.__miniRpaLoaded) {
       if (msg.cmd === 'abort') {
         aborted = true;
         sendResponse({ ok: true });
+        return;
+      }
+      if (msg.cmd === 'analyzePattern') {
+        try { sendResponse(analyzePattern(msg.pattern, msg.text, msg.prefix)); }
+        catch (e) { sendResponse({ ok: false, error: e.message }); }
         return;
       }
       if (msg.cmd === 'countMatches') {
