@@ -56,7 +56,9 @@ between tabs.
       are reference images only - they are skipped during playback.
 
   Tidy up
-      The small x on any step deletes just that step. "Clear" wipes the whole
+      The small x on any step deletes just that step, and an "Undo" appears in
+      case that was not what you meant - it puts the step back where it was,
+      along with any action set that shrank around it. "Clear" wipes the whole
       recording (it asks for a second click first).
 
   Stop
@@ -356,6 +358,12 @@ boundaries:
 
   - Elements are found by selector first, then by tag plus visible text. A page
     that changes its wording between recording and playback can break a step.
+
+  - Only the main page is recorded and replayed. Anything inside an embedded
+    frame - some sites put sign-in boxes, payment forms and the occasional
+    dialog in one - cannot be seen or clicked. When a step cannot be found and
+    the page has frames on it, the message says so, so you are not left
+    guessing why a control that is plainly on screen could not be reached.
 
   - Passwords are never saved. Typing in a password box is recorded as a step so
     the field still gets focused at playback, but the value itself is deliberately

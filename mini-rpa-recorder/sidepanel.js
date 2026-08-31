@@ -40,6 +40,7 @@
   var clearTimer = null;
   var countTimers = {};
   var selected = {};        /* step ids ticked for grouping */
+  var undoSnapshot = null;  /* the whole list as it was before a delete */
 
   /* ------------------------------------------------------------ messaging */
 
@@ -47,6 +48,22 @@
     return chrome.runtime.sendMessage(payload).catch(function (e) {
       return { ok: false, error: String((e && e.message) || e) };
     });
+  }
+
+  function showUndo() {
+    if (!undoSnapshot) return;
+    el.notice.hidden = false;
+    el.notice.className = 'notice notice-info';
+    el.notice.textContent = '';
+    var msg = document.createElement('span');
+    msg.textContent = 'Deleted “' + trunc(undoSnapshot.label, 44) + '”. ';
+    el.notice.appendChild(msg);
+    var undo = document.createElement('button');
+    undo.type = 'button';
+    undo.className = 'link-btn';
+    undo.dataset.role = 'undo';
+    undo.textContent = 'Undo';
+    el.notice.appendChild(undo);
   }
 
   function showLocalNotice(text, kind) {
@@ -769,6 +786,10 @@
     restoreFocus(snap);
     renderSelectionBar();
 
+    /* While recording, the step that just happened is the one worth seeing;
+     * otherwise the list quietly fills up out of sight. */
+    if (mode === 'recording' && !snap) el.list.scrollTop = el.list.scrollHeight;
+
     if (mode !== 'playing') {
       steps.forEach(function (step) {
         if (step.repeat && step.repeat.enabled) refreshCount(step.id, step.repeat.pattern);
@@ -851,7 +872,17 @@
     var role = target.dataset.role;
     var id = target.dataset.id;
 
-    if (role === 'delete') { actAndReport({ cmd: 'deleteStep', id: id }); return; }
+    if (role === 'delete') {
+      /* A recording is built by hand and the × has no confirm, so keep the
+       * whole list as it was. Snapshotting everything rather than the one step
+       * also restores any action set that shrank around it. */
+      var doomed = stepById(id);
+      undoSnapshot = { steps: steps.slice(), label: doomed ? describe(doomed) : 'that step' };
+      actAndReport({ cmd: 'deleteStep', id: id }).then(function (res) {
+        if (res && res.ok !== false) showUndo();
+      });
+      return;
+    }
 
     if (role === 'collapse') {
       var s = stepById(id);
@@ -917,6 +948,14 @@
       });
       return;
     }
+  });
+
+  el.notice.addEventListener('click', function (e) {
+    if (!e.target || !e.target.dataset || e.target.dataset.role !== 'undo') return;
+    if (!undoSnapshot) return;
+    var restore = undoSnapshot.steps;
+    undoSnapshot = null;
+    actAndReport({ cmd: 'restoreSteps', steps: restore });
   });
 
   el.selectBar.addEventListener('click', function (e) {
@@ -1030,6 +1069,7 @@
   }
 
   el.btnStart.addEventListener('click', function () {
+    undoSnapshot = null;
     showLocalNotice('Starting recording…', 'info');
     actAndReport({ cmd: 'startRecording' });
   });

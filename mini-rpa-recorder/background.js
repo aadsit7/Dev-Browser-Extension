@@ -148,6 +148,12 @@ function normalizeRepeat(repeat) {
  * Grouping is deliberately separate from looping now - a set is useful on its
  * own for keeping a sequence together - so the size lives on step.set, with a
  * fallback to where it used to live so older recordings still play. */
+function rawSetSize(step) {
+  if (step && step.set && step.set.size > 0) return Math.round(step.set.size);
+  if (step && step.repeat && step.repeat.groupSize > 0) return Math.round(step.repeat.groupSize);
+  return 1;
+}
+
 function groupSizeFor(step, index, total) {
   var wanted = 1;
   if (step && step.set && step.set.size > 0) wanted = Math.round(step.set.size);
@@ -1073,13 +1079,44 @@ function handleMessage(msg, sender) {
     case 'deleteStep':
       return serialize(function () {
         return getLocal('steps').then(function (d) {
-          var steps = (Array.isArray(d.steps) ? d.steps : []).filter(function (s) { return s.id !== msg.id; });
+          var steps = Array.isArray(d.steps) ? d.steps.slice() : [];
+          var gone = -1;
+          for (var k = 0; k < steps.length; k++) if (steps[k].id === msg.id) { gone = k; break; }
+          if (gone < 0) return { ok: true };
+
+          /* A set that covered the deleted step has to shrink with it.
+           * Leaving the size alone would silently pull in whatever step slid
+           * up into the gap - on a looping set, an extra action on every
+           * single pass. */
+          for (var i = 0; i < steps.length; i++) {
+            if (i === gone) continue;
+            var size = rawSetSize(steps[i]);
+            if (size < 2) continue;
+            if (gone > i && gone < i + size) {
+              var shrunk = size - 1;
+              var stillLoops = !!(steps[i].repeat && steps[i].repeat.enabled);
+              steps[i] = Object.assign({}, steps[i], {
+                set: (shrunk < 2 && !stillLoops)
+                  ? null
+                  : Object.assign({}, steps[i].set || {}, { size: shrunk })
+              });
+            }
+          }
+          steps.splice(gone, 1);
           return saveSteps(steps).then(function () { return { ok: true }; });
         });
       });
 
     case 'setRepeat':
       return updateStep(msg.id, { repeat: msg.repeat || null });
+
+    case 'restoreSteps':
+      return serialize(function () {
+        var steps = Array.isArray(msg.steps) ? msg.steps : [];
+        return saveSteps(steps)
+          .then(function () { return notice('Step restored.', 'info'); })
+          .then(function () { return { ok: true }; });
+      });
 
     case 'setGroup':
       return updateStep(msg.id, { set: msg.set || null });
