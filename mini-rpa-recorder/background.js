@@ -144,8 +144,14 @@ function normalizeRepeat(repeat) {
   };
 }
 
+/* How many steps an action set covers: the anchor plus the ones after it.
+ * Grouping is deliberately separate from looping now - a set is useful on its
+ * own for keeping a sequence together - so the size lives on step.set, with a
+ * fallback to where it used to live so older recordings still play. */
 function groupSizeFor(step, index, total) {
-  var wanted = normalizeRepeat(step.repeat).groupSize;
+  var wanted = 1;
+  if (step && step.set && step.set.size > 0) wanted = Math.round(step.set.size);
+  else if (step && step.repeat && step.repeat.groupSize > 0) wanted = Math.round(step.repeat.groupSize);
   return Math.max(1, Math.min(wanted, total - index));
 }
 
@@ -976,6 +982,26 @@ function analyzePattern(pattern, text, prefix) {
   });
 }
 
+function previewPattern(pattern) {
+  if (!String(pattern || '').trim()) {
+    return Promise.resolve({ ok: false, error: 'Enter a match pattern first.' });
+  }
+  return getActiveTab().then(function (tab) {
+    if (!tab) return { ok: false, error: 'No active tab to check against.' };
+    var block = injectionBlockReason(tab.url);
+    if (block) return { ok: false, error: 'Open the page you want to check in the active tab (' + block + ').' };
+    return ensureContentScript(tab.id)
+      .then(function () { return focusTab(tab.id, tab.windowId); })
+      .then(function () { return sendToTab(tab.id, { cmd: 'previewPattern', pattern: pattern }); })
+      .then(function (out) {
+        if (!out) return { ok: false, error: 'The page did not answer.' };
+        if (out.ok === false) return out;
+        return { ok: true, count: out.count, labels: out.labels, tabTitle: tab.title || hostOf(tab.url) };
+      })
+      .catch(function (e) { return { ok: false, error: errText(e) }; });
+  });
+}
+
 function countMatches(pattern) {
   if (!String(pattern || '').trim()) {
     return Promise.resolve({ ok: false, error: 'Enter a match pattern first.' });
@@ -1055,11 +1081,17 @@ function handleMessage(msg, sender) {
     case 'setRepeat':
       return updateStep(msg.id, { repeat: msg.repeat || null });
 
+    case 'setGroup':
+      return updateStep(msg.id, { set: msg.set || null });
+
     case 'countMatches':
       return countMatches(msg.pattern);
 
     case 'analyzePattern':
       return analyzePattern(msg.pattern, msg.text, msg.prefix);
+
+    case 'previewPattern':
+      return previewPattern(msg.pattern);
 
     case 'recordStep':
       return getLocal('mode').then(function (d) {

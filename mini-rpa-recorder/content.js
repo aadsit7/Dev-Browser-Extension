@@ -681,6 +681,32 @@ if (window.__miniRpaLoaded) {
       };
     }
 
+    /* Shows the user exactly which elements a loop would act on, by outlining
+     * them on the page without touching them. Guessing from a count alone is
+     * how a pattern that looks right turns out to be picking up the wrong
+     * rows. */
+    function previewPattern(pattern) {
+      var nodes = queryPattern(pattern);
+      var labels = [];
+      for (var i = 0; i < nodes.length; i++) {
+        if (i === 0) bringIntoView(nodes[i]);
+        var el = nodes[i];
+        var prevOutline = el.style.outline;
+        var prevOffset = el.style.outlineOffset;
+        el.style.outline = '3px solid #1f6feb';
+        el.style.outlineOffset = '2px';
+        (function (node, o, f) {
+          setTimeout(function () {
+            try { node.style.outline = o; node.style.outlineOffset = f; } catch (e) { /* gone */ }
+          }, 2500);
+        })(el, prevOutline, prevOffset);
+        if (labels.length < 6) {
+          labels.push(squash(visibleText(el) || attr(el, 'aria-label')).slice(0, 40));
+        }
+      }
+      return { ok: true, count: nodes.length, labels: labels };
+    }
+
     function repeatProbe(pattern) {
       var nodes = queryPattern(pattern);
       return { ok: true, count: nodes.length, distinct: allSignaturesDistinct(nodes) };
@@ -789,6 +815,11 @@ if (window.__miniRpaLoaded) {
       if (msg.cmd === 'abort') {
         aborted = true;
         sendResponse({ ok: true });
+        return;
+      }
+      if (msg.cmd === 'previewPattern') {
+        try { sendResponse(previewPattern(msg.pattern)); }
+        catch (e) { sendResponse({ ok: false, error: e.message }); }
         return;
       }
       if (msg.cmd === 'analyzePattern') {

@@ -75,21 +75,45 @@ between tabs.
 3. REPEAT MODE
 -------------------------------------------------------------------------------
 
-Every click step in the list has a "Repeat on every matching element" toggle.
-Switch it on and the step stops being "click that one button" and becomes "keep
-clicking every button that matches this pattern".
+ACTION SETS
 
-A pass can be more than one click. On a lot of pages the row button opens a
-dialog, and the real unit of work is "click the row, confirm in the dialog that
-pops up, press next, scroll". Those steps are already in your recording, so the
-"Steps in each pass" box says how many of them belong to one turn of the loop:
-this step plus the ones after it. Set it to 1 and you get a plain repeated
-click. Set it to 4 and each pass runs all four steps before finding the next
-matching element. The panel lists the exact steps a pass will run underneath the
-box, so you can see what you have selected rather than counting in your head.
+On a lot of pages the real unit of work is more than one click: press the button
+on a row, confirm in the dialog that pops up, then scroll. Those steps are
+already in your recording, so you bundle them into an ACTION SET and the set
+becomes the thing that repeats.
 
-Steps inside a pass run only inside it - they are not replayed again afterwards
-- and a pass cannot contain another repeating step.
+To make one, tick two or more steps that sit next to each other and press
+"Group into an action set". They collapse into a single card showing what the
+set does and how many steps it covers. The card opens and closes with the
+triangle on its left, so a long recording stays readable.
+
+A set can be adjusted in place - "+ Add step N to this set" and "- Drop step N"
+on the card - so you do not have to ungroup and start over if you bundled one
+step too few. "Ungroup" puts the steps back as they were.
+
+THE LOOP BUTTON
+
+Every set has a Loop button, and so does any single click step that is not in a
+set. Press it and the step or set stops being "do this once" and becomes "do
+this once for every matching element on the page".
+
+Turning Loop on shows two things and nothing else:
+
+    Repeat up to [25] times          [Show me on the page]
+
+That is the whole common case. Everything else - the match pattern, the wait
+between turns, what to do if a step is missing - sits behind "Match pattern and
+timing", closed by default.
+
+Steps inside a set run only inside it - they are not replayed again afterwards
+- and a set cannot contain another looping step.
+
+SHOW ME ON THE PAGE
+
+Press it and every element the loop would act on is outlined on the page in
+blue for a couple of seconds, and the panel reports how many there were and
+names a few. Nothing is clicked. This is the fastest way to be sure a pattern
+is picking up the rows you meant and not, say, the ones you have already done.
 
 The pattern is deliberately NOT the selector used for the single click. Selectors
 that count positions (nth-of-type, nth-child) break the moment the first click
@@ -152,8 +176,9 @@ WORKED EXAMPLE
   1. On a page with a list of repeating buttons (invitations, notifications,
      "Dismiss" rows - whatever), press Start Recording.
   2. Click ONE of those buttons. Press Stop Recording.
-  3. In the step list, find that click step and switch "Repeat on every matching
-     element" on. The row expands to show three fields and a read-out.
+  3. In the step list, press "Loop" on that step (or tick it together with the
+     steps that follow it and group them into an action set first, then press
+     Loop on the set).
   4. Look at the read-out:
 
          Currently matches 5 elements on the active tab (Invites).
@@ -165,12 +190,12 @@ WORKED EXAMPLE
      says 0, the pattern is too narrow. If it is higher than the number of rows
      still to do, it is too broad and is probably picking up rows you have
      already actioned - widen or narrow it by hand in the "Match pattern" box.
-  5. Set "Max repeats" (default 25) and "Delay between repeats" in seconds
-     (default 2.0). If confirming the action needs a dialog or a second click,
-     set "Steps in each pass" to cover those steps too and check the list of
-     steps shown underneath matches what one turn of the loop should do. Leave
-     "If a step in the pass is missing" on "Stop and tell me" unless one of
-     those steps is genuinely optional.
+  5. Set "Repeat up to N times" (default 25), then press "Show me on the page"
+     and look at what gets outlined - those are exactly the elements the loop
+     will act on. If the outlines are on the right rows, the pattern is right.
+     Timing and the missing-step setting live under "Match pattern and timing";
+     leave "If a step is missing" on "Stop and tell me" unless one of the steps
+     is genuinely optional.
   6. Press Play. The status line shows a live counter:
 
          Repeat 12 of up to 25
