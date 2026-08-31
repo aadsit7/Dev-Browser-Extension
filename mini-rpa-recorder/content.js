@@ -25,7 +25,6 @@ if (window.__miniRpaLoaded) {
     var SCROLL_THROTTLE_MS = 600;
     var RESCUE_LIMIT = 3;
     var RESCUE_WAIT_MS = 2000;
-    var STALL_LIMIT = 3;
     var KEEPALIVE_MS = 15000;
 
     var recording = false;
@@ -107,11 +106,20 @@ if (window.__miniRpaLoaded) {
       return el.id === BADGE_ID || !!el.closest('#' + BADGE_ID);
     }
 
+    /* An open modal marks the page behind it aria-hidden or inert. Those
+     * elements are still in the DOM and still match a selector, but clicking
+     * one does nothing - which is exactly how a repeat loop ends up spinning
+     * against a page that has a dialog sitting on top of it. */
+    function isBehindModal(el) {
+      try { return !!el.closest('[aria-hidden="true"], [inert]'); } catch (e) { return false; }
+    }
+
     function isUsable(el) {
       if (!el || el.nodeType !== 1) return false;
       if (isOurBadge(el)) return false;
       if (el.disabled) return false;
       if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return false;
+      if (isBehindModal(el)) return false;
       var rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return false;
       var style = window.getComputedStyle(el);
@@ -365,11 +373,61 @@ if (window.__miniRpaLoaded) {
       return null;
     }
 
-    function findOnce(step) {
+    /* The topmost visible dialog, if the page has one open. */
+    function openDialog() {
+      var nodes;
+      try {
+        nodes = document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]');
+      } catch (e) { return null; }
+      for (var i = nodes.length - 1; i >= 0; i--) {
+        var n = nodes[i];
+        var rect = n.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return n;
+      }
+      return null;
+    }
+
+    function findWithin(root, step) {
       if (step.selector) {
-        var found = null;
-        try { found = document.querySelector(step.selector); } catch (e) { found = null; }
-        if (found && isUsable(found)) return found;
+        var hit = null;
+        try { hit = root.querySelector(step.selector); } catch (e) { hit = null; }
+        if (hit && isUsable(hit)) return hit;
+      }
+      var want = squash(step.fallbackText || step.ariaLabel || '').toLowerCase();
+      if (!want) return null;
+      var tag = (step.tagName || '*').toLowerCase();
+      var nodes;
+      try { nodes = root.querySelectorAll(tag); } catch (e) { return null; }
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (!isUsable(n)) continue;
+        if (visibleText(n).toLowerCase() === want) return n;
+        if (attr(n, 'aria-label').toLowerCase() === want) return n;
+      }
+      return null;
+    }
+
+    function findOnce(step) {
+      /* A dialog on top of the page owns the interaction while it is open, and
+       * pages very often have a second "Next" or "Accept" underneath it. */
+      var dialog = openDialog();
+      if (dialog) {
+        var inDialog = findWithin(dialog, step);
+        if (inDialog) return inDialog;
+      }
+      if (step.selector) {
+        var matches = null;
+        try { matches = document.querySelectorAll(step.selector); } catch (e) { matches = null; }
+        if (matches && matches.length) {
+          for (var i = 0; i < matches.length; i++) {
+            if (isUsable(matches[i])) return matches[i];
+          }
+          /* The element is on the page but not usable yet - hidden, or sitting
+           * behind a dialog. Waiting for it is right; falling through to match
+           * whatever else happens to share its wording is how a replay ends up
+           * clicking a completely different button. */
+          return null;
+        }
       }
       return findByText(step);
     }
@@ -488,18 +546,20 @@ if (window.__miniRpaLoaded) {
       return bits.join(', ');
     }
 
-    function playStep(step) {
+    function playStep(step, timeoutMs) {
+      var wait = timeoutMs > 0 ? timeoutMs : ELEMENT_TIMEOUT_MS;
       if (step.type === 'scroll') {
         var y = Number(step.value);
         window.scrollTo(0, isFinite(y) ? y : 0);
         return Promise.resolve({ ok: true });
       }
-      return waitForElement(step, ELEMENT_TIMEOUT_MS).then(function (el) {
+      return waitForElement(step, wait).then(function (el) {
         if (aborted) return { ok: true, stopped: true };
         if (!el) {
           return {
             ok: false,
-            error: 'could not find ' + describeTarget(step) + ' after waiting 10 seconds'
+            error: 'could not find ' + describeTarget(step) +
+                   ' after waiting ' + Math.round(wait / 1000) + ' seconds'
           };
         }
         bringIntoView(el);
@@ -562,90 +622,101 @@ if (window.__miniRpaLoaded) {
 
     /* ------------------------------------------------------ repeat execution */
 
-    function reportRepeat(count, max, remaining, note) {
-      send({ cmd: 'repeatProgress', count: count, max: max, remaining: remaining, note: note || '' });
+    /* Identifies "this is the same element as last round" without holding a
+     * reference across rounds, since the list re-renders after every action.
+     *
+     * Deliberately identity attributes only, never the visible text: acting on
+     * a row is exactly what changes its text ("Connect" becomes "Pending"), so
+     * a text-based fingerprint would stop matching the very element it was
+     * meant to remember, and the row would be picked again next round. */
+    function signatureOf(el) {
+      var identity = attr(el, 'aria-label') || attr(el, 'id') ||
+                     attr(el, 'data-testid') || attr(el, 'name');
+      return identity || '';
     }
 
-    function runRepeat(step, config) {
-      var pattern = config.pattern;
-      var maxRepeats = config.maxRepeats;
-      var delayMs = config.delayMs;
-      var rounds = 0;
-      var rescues = 0;
-      var stall = 0;
-      var lastCount = -1;
+    function allSignaturesDistinct(nodes) {
+      var seen = {};
+      for (var i = 0; i < nodes.length; i++) {
+        var sig = signatureOf(nodes[i]);
+        /* No identity means the rounds cannot be told apart this way. */
+        if (!sig) return false;
+        if (seen[sig]) return false;
+        seen[sig] = true;
+      }
+      return true;
+    }
 
-      function finish(reason) {
-        reportRepeat(rounds, maxRepeats, 0, reason);
-        return { ok: true, rounds: rounds, reason: reason };
+    function repeatProbe(pattern) {
+      var nodes = queryPattern(pattern);
+      return { ok: true, count: nodes.length, distinct: allSignaturesDistinct(nodes) };
+    }
+
+    /* Clicks one element and reports which one, so the caller can drive a
+     * multi-step pass around it and know when to stop. */
+    /* Everything about an element that a working click would be expected to
+     * change. Compared round over round to tell "the click did nothing" apart
+     * from "the row was handled and now looks different". */
+    function stateOf(el) {
+      return [
+        visibleText(el),
+        el.disabled ? '1' : '0',
+        attr(el, 'aria-disabled'),
+        attr(el, 'aria-pressed'),
+        attr(el, 'aria-checked')
+      ].join('\u0001');
+    }
+
+    function findBySignature(nodes, signature) {
+      for (var i = 0; i < nodes.length; i++) {
+        if (signatureOf(nodes[i]) === signature) return nodes[i];
+      }
+      return null;
+    }
+
+    function repeatClickNext(pattern, handled, useSignatures, previous) {
+      var nodes = queryPattern(pattern);
+      var countBefore = nodes.length;
+
+      /* Did last round's click actually do anything? */
+      var previousUnchanged = false;
+      if (previous && previous.signature) {
+        var was = findBySignature(nodes, previous.signature);
+        previousUnchanged = !!(was && stateOf(was) === previous.state);
       }
 
-      function round() {
-        if (aborted) return Promise.resolve(finish('Stopped by you after ' + rounds + ' round(s).'));
-        if (rounds >= maxRepeats) {
-          return Promise.resolve(finish('Reached the limit of ' + maxRepeats + ' repeats.'));
+      var target = null;
+      if (useSignatures) {
+        var done = {};
+        for (var h = 0; h < (handled || []).length; h++) done[handled[h]] = true;
+        for (var i = 0; i < nodes.length; i++) {
+          if (!done[signatureOf(nodes[i])]) { target = nodes[i]; break; }
         }
-
-        var matches;
-        try {
-          matches = queryPattern(pattern);
-        } catch (e) {
-          return Promise.resolve({ ok: false, rounds: rounds, error: e.message });
-        }
-
-        if (matches.length === 0) {
-          if (rescues >= RESCUE_LIMIT) {
-            return Promise.resolve(finish(
-              'No more matching elements (after ' + rescues + ' scroll-to-load attempts) - stopped after ' +
-              rounds + ' round(s).'));
-          }
-          rescues += 1;
-          reportRepeat(rounds, maxRepeats, 0,
-            'No matches left - scrolling down to load more (attempt ' + rescues + ' of ' + RESCUE_LIMIT + ')');
-          try {
-            window.scrollTo(0, document.documentElement.scrollHeight);
-          } catch (e) { /* ignore */ }
-          return sleepInterruptible(RESCUE_WAIT_MS).then(function () {
-            if (aborted) return finish('Stopped by you after ' + rounds + ' round(s).');
-            var again;
-            try {
-              again = queryPattern(pattern);
-            } catch (e2) {
-              return { ok: false, rounds: rounds, error: e2.message };
-            }
-            if (again.length === 0) return round();
-            lastCount = -1;
-            stall = 0;
-            return round();
-          });
-        }
-
-        /* Stall guard: if the pool never shrinks, the clicks are not landing. */
-        if (lastCount >= 0 && matches.length >= lastCount) stall += 1;
-        else stall = 0;
-        lastCount = matches.length;
-        if (stall >= STALL_LIMIT) {
-          return Promise.resolve(finish(
-            'Clicks are not having an effect — stopped after ' + rounds + ' rounds.'));
-        }
-
-        var el = matches[0];
-        bringIntoView(el);
-        highlight(el);
-        try {
-          clickElement(el);
-        } catch (e) {
-          return Promise.resolve({
-            ok: false, rounds: rounds,
-            error: 'the page rejected the click (' + (e && e.message ? e.message : e) + ')'
-          });
-        }
-        rounds += 1;
-        reportRepeat(rounds, maxRepeats, matches.length - 1, '');
-        return sleepInterruptible(delayMs).then(round);
+      } else if (nodes.length) {
+        target = nodes[0];
       }
+      if (!target) {
+        return { ok: true, clicked: false, countBefore: countBefore, previousUnchanged: previousUnchanged };
+      }
+      var signature = signatureOf(target);
+      var state = stateOf(target);
+      bringIntoView(target);
+      highlight(target);
+      clickElement(target);
+      return {
+        ok: true, clicked: true, signature: signature, state: state,
+        countBefore: countBefore, previousUnchanged: previousUnchanged
+      };
+    }
 
-      return round();
+    /* Lazy lists only reveal the next batch once you reach the bottom. */
+    function repeatRescue(pattern) {
+      try { window.scrollTo(0, document.documentElement.scrollHeight); } catch (e) { /* ignore */ }
+      return sleepInterruptible(RESCUE_WAIT_MS).then(function () {
+        var nodes;
+        try { nodes = queryPattern(pattern); } catch (e) { return { ok: false, error: e.message }; }
+        return { ok: true, count: nodes.length };
+      });
     }
 
     /* ------------------------------------------------------------- messaging */
@@ -672,15 +743,26 @@ if (window.__miniRpaLoaded) {
       }
       if (msg.cmd === 'playStep') {
         aborted = false;
-        playStep(msg.step).then(sendResponse).catch(function (e) {
+        playStep(msg.step, msg.timeoutMs).then(sendResponse).catch(function (e) {
           sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
         });
         return true;
       }
-      if (msg.cmd === 'runRepeat') {
+      if (msg.cmd === 'repeatProbe') {
+        try { sendResponse(repeatProbe(msg.pattern)); }
+        catch (e) { sendResponse({ ok: false, error: e.message }); }
+        return;
+      }
+      if (msg.cmd === 'repeatClickNext') {
         aborted = false;
-        runRepeat(msg.step, msg.config).then(sendResponse).catch(function (e) {
-          sendResponse({ ok: false, rounds: 0, error: String(e && e.message ? e.message : e) });
+        try { sendResponse(repeatClickNext(msg.pattern, msg.handled, msg.useSignatures, msg.previous)); }
+        catch (e) { sendResponse({ ok: false, error: e.message }); }
+        return;
+      }
+      if (msg.cmd === 'repeatRescue') {
+        aborted = false;
+        repeatRescue(msg.pattern).then(sendResponse).catch(function (e) {
+          sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
         });
         return true;
       }

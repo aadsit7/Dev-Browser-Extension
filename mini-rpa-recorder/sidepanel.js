@@ -187,8 +187,21 @@
       enabled: true,
       pattern: derivePattern(step),
       maxRepeats: DEFAULT_MAX_REPEATS,
-      delaySeconds: DEFAULT_DELAY_SECONDS
+      delaySeconds: DEFAULT_DELAY_SECONDS,
+      groupSize: 1
     };
+  }
+
+  function groupSizeOf(step) {
+    var n = step.repeat && step.repeat.groupSize;
+    n = parseInt(n, 10);
+    if (isNaN(n) || n < 1) n = 1;
+    return n;
+  }
+
+  function stepIndexById(id) {
+    for (var i = 0; i < steps.length; i++) if (steps[i].id === id) return i;
+    return -1;
   }
 
   /* ----------------------------------------------------------- status line */
@@ -285,7 +298,8 @@
 
   function renderKey() {
     return steps.map(function (s) {
-      return s.id + ':' + s.type + ':' + (s.repeat && s.repeat.enabled ? '1' : '0');
+      return s.id + ':' + s.type + ':' + (s.repeat && s.repeat.enabled ? '1' : '0') +
+             ':' + (s.repeat && s.repeat.enabled ? groupSizeOf(s) : 0);
     }).join('|') + '#' + mode;
   }
 
@@ -368,6 +382,29 @@
 
     box.appendChild(twoUp);
 
+    /* A pass is usually more than one click: on a lot of pages the row button
+     * opens a dialog, and confirming inside it is part of the same unit of
+     * work. Those steps are already recorded - this just says how many of them
+     * belong to each turn of the loop. */
+    var groupInput = document.createElement('input');
+    groupInput.type = 'number';
+    groupInput.min = '1';
+    groupInput.step = '1';
+    var here = stepIndexById(step.id);
+    var maxGroup = here < 0 ? 1 : steps.length - here;
+    groupInput.max = String(maxGroup);
+    groupInput.value = String(Math.min(groupSizeOf(step), maxGroup));
+    groupInput.dataset.fkey = step.id + ':group';
+    groupInput.dataset.role = 'group';
+    groupInput.dataset.id = step.id;
+    box.appendChild(makeField('Steps in each pass', groupInput));
+
+    var preview = document.createElement('div');
+    preview.className = 'pass-preview';
+    preview.dataset.passFor = step.id;
+    box.appendChild(preview);
+    fillPassPreview(preview, step);
+
     var limits = document.createElement('p');
     limits.className = 'hint';
     limits.textContent = 'Capped at ' + MAX_REPEATS_CEILING + ' repeats and a ' + DELAY_FLOOR_SECONDS +
@@ -382,6 +419,30 @@
     box.appendChild(readout);
 
     return box;
+  }
+
+  /* Spells out exactly which recorded steps one turn of the loop will run, so
+   * the pass length is not a number the user has to picture in their head. */
+  function fillPassPreview(node, step) {
+    node.textContent = '';
+    var here = stepIndexById(step.id);
+    if (here < 0) return;
+    var size = Math.min(groupSizeOf(step), steps.length - here);
+    var head = document.createElement('div');
+    head.className = 'pass-head';
+    head.textContent = size === 1
+      ? 'Each pass: one click on a matching element.'
+      : 'Each pass runs steps ' + (here + 1) + '–' + (here + size) + ':';
+    node.appendChild(head);
+    if (size === 1) return;
+    var ol = document.createElement('ol');
+    ol.className = 'pass-list';
+    for (var i = here; i < here + size; i++) {
+      var li = document.createElement('li');
+      li.textContent = (i === here ? 'the matching element — ' : '') + describe(steps[i]);
+      ol.appendChild(li);
+    }
+    node.appendChild(ol);
   }
 
   function buildStep(step, index) {
@@ -551,7 +612,8 @@
        * of it; only a step that has never had a pattern gets a fresh one. */
       var previous = step.repeat && String(step.repeat.pattern || '').trim() ? step.repeat : null;
       saveRepeat(step.id, previous
-        ? { enabled: true, pattern: previous.pattern, maxRepeats: previous.maxRepeats, delaySeconds: previous.delaySeconds }
+        ? { enabled: true, pattern: previous.pattern, maxRepeats: previous.maxRepeats,
+            delaySeconds: previous.delaySeconds, groupSize: previous.groupSize == null ? 1 : previous.groupSize }
         : defaultRepeat(step));
     } else if (step.repeat) {
       /* Kept, not discarded: switching the toggle back on should not cost the
@@ -564,7 +626,7 @@
     var target = e.target;
     if (!target || !target.dataset || !target.dataset.role) return;
     var role = target.dataset.role;
-    if (role !== 'pattern' && role !== 'max' && role !== 'delay') return;
+    if (role !== 'pattern' && role !== 'max' && role !== 'delay' && role !== 'group') return;
 
     var step = stepById(target.dataset.id);
     if (!step) return;
@@ -573,7 +635,8 @@
       enabled: true,
       pattern: current.pattern,
       maxRepeats: current.maxRepeats,
-      delaySeconds: current.delaySeconds
+      delaySeconds: current.delaySeconds,
+      groupSize: current.groupSize == null ? 1 : current.groupSize
     };
 
     if (role === 'pattern') {
@@ -582,6 +645,14 @@
     } else if (role === 'max') {
       var m = parseInt(target.value, 10);
       updated.maxRepeats = isNaN(m) ? DEFAULT_MAX_REPEATS : Math.min(MAX_REPEATS_CEILING, Math.max(1, m));
+    } else if (role === 'group') {
+      var here = stepIndexById(step.id);
+      var maxGroup = here < 0 ? 1 : steps.length - here;
+      var g = parseInt(target.value, 10);
+      updated.groupSize = isNaN(g) ? 1 : Math.min(maxGroup, Math.max(1, g));
+      step.repeat = updated;
+      var node = el.list.querySelector('[data-pass-for="' + step.id + '"]');
+      if (node) fillPassPreview(node, step);
     } else {
       var d = parseFloat(target.value);
       updated.delaySeconds = isNaN(d) ? DEFAULT_DELAY_SECONDS : Math.max(DELAY_FLOOR_SECONDS, d);
@@ -596,10 +667,12 @@
     var target = e.target;
     if (!target || !target.dataset) return;
     var role = target.dataset.role;
-    if (role !== 'max' && role !== 'delay') return;
+    if (role !== 'max' && role !== 'delay' && role !== 'group') return;
     var step = stepById(target.dataset.id);
     if (!step || !step.repeat) return;
-    target.value = String(role === 'max' ? step.repeat.maxRepeats : step.repeat.delaySeconds);
+    if (role === 'max') target.value = String(step.repeat.maxRepeats);
+    else if (role === 'delay') target.value = String(step.repeat.delaySeconds);
+    else target.value = String(groupSizeOf(step));
   }, true);
 
   /* ------------------------------------------------------- main controls */
