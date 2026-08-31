@@ -14,7 +14,9 @@ var GAP_MIN_MS = 250;
 var GAP_MAX_MS = 3000;
 var TAB_LOAD_TIMEOUT_MS = 20000;
 var STALL_LIMIT = 3;           /* rounds with no progress before giving up */
-var FOLLOWER_TIMEOUT_MS = 5000; /* per follow-on step inside a repeat pass */
+var FOLLOWER_TIMEOUT_MS = 5000;  /* per follow-on step when misses are skipped */
+var FOLLOWER_STRICT_MS = 10000; /* per follow-on step when a miss stops the run */
+var SETTLE_TIMEOUT_MS = 8000;   /* wait for a dialog to clear between passes */
 var RESCUE_LIMIT = 3;          /* scroll-to-load attempts per repeat step */
 var DEFAULT_GROUP_SIZE = 1;
 
@@ -133,7 +135,12 @@ function normalizeRepeat(repeat) {
     delaySeconds: delayMs / 1000,
     /* How many steps make up one pass: this step plus the ones after it, so a
      * pass can cover "click the row, accept in the dialog, press next". */
-    groupSize: Math.round(clamp(r.groupSize == null ? DEFAULT_GROUP_SIZE : r.groupSize, 1, 50))
+    groupSize: Math.round(clamp(r.groupSize == null ? DEFAULT_GROUP_SIZE : r.groupSize, 1, 50)),
+    /* What to do when a step in the pass cannot be found. Stopping is the
+     * default because a half-finished pass usually means the action never
+     * completed - the invitation was never sent, the dialog is still up - and
+     * carrying on from there quietly does the wrong thing to every row after. */
+    onMissing: r.onMissing === 'skip' ? 'skip' : 'stop'
   };
 }
 
@@ -531,7 +538,9 @@ function runOneStep(step, index) {
       if (step.type === 'switchTab') return { ok: true };
       return ensureContentScript(resolved.tabId).then(function () {
         return sendToTab(resolved.tabId, {
-          cmd: 'playStep', step: step, timeoutMs: step.__passFollower ? FOLLOWER_TIMEOUT_MS : 0
+          cmd: 'playStep', step: step,
+          timeoutMs: step.__passFollower === 'strict' ? FOLLOWER_STRICT_MS
+                   : step.__passFollower === 'lenient' ? FOLLOWER_TIMEOUT_MS : 0
         }).then(function (out) {
           if (!out) return { ok: false, error: 'the page did not answer' };
           if (out.ok === false) return { ok: false, error: out.error };
@@ -551,10 +560,12 @@ function runOneStep(step, index) {
 
 /* One step of a repeat pass, run the ordinary way but with any repeat setting
  * stripped so a pass can never nest inside itself. */
-function runFollowerStep(step, index) {
+function runFollowerStep(step, index, strict) {
   if (step.type === 'screenshot') return Promise.resolve({ ok: true, skipped: true });
-  return runOneStep(Object.assign({}, step, { repeat: null, __passFollower: true }), index)
-    .catch(function (e) { return { ok: false, error: errText(e) }; });
+  return runOneStep(Object.assign({}, step, {
+    repeat: null,
+    __passFollower: strict ? 'strict' : 'lenient'
+  }), index).catch(function (e) { return { ok: false, error: errText(e) }; });
 }
 
 /* Repeat mode drives from here rather than from the page, because a pass can
@@ -618,18 +629,25 @@ function runRepeatPass(step, index, steps, tabId) {
     return stillRunning().then(function (running) {
       if (!running) return { ok: true, stopped: true };
       var follower = followers[i];
-      return runFollowerStep(follower, index + 1 + i).then(function (res) {
+      var strict = cfg.onMissing === 'stop';
+      return runFollowerStep(follower, index + 1 + i, strict).then(function (res) {
         if (res && res.ok === false) {
-          /* A dialog that does not appear on every row should not end the run;
-           * the pass carries on and the skip is reported at the end. */
+          if (strict) {
+            /* The pass did not finish, so the action it was doing did not
+             * happen either. Moving to the next element from here would leave
+             * this one half-done and, if a dialog is still up, click the next
+             * rows into a covered page. */
+            return { ok: false, missedStep: index + 2 + i, error: res.error };
+          }
           skippedFollowers += 1;
           return { ok: true, missed: true };
         }
         return { ok: true, missed: false };
       }).then(function (res) {
-        if (res.stopped) return res;
+        if (res.ok === false || res.stopped) return res;
         return runFollowers(i + 1).then(function (rest) {
-          return { ok: true, stopped: rest.stopped, missed: res.missed || rest.missed };
+          return { ok: rest.ok, missedStep: rest.missedStep, error: rest.error,
+                   stopped: rest.stopped, missed: res.missed || rest.missed };
         });
       });
     });
@@ -705,6 +723,13 @@ function runRepeatPass(step, index, steps, tabId) {
           return runFollowers(0);
         }).then(function (res) {
           if (res.stopped) return finish('Stopped by you after ' + rounds + ' pass(es).');
+          if (res.ok === false) {
+            return finish('Pass ' + rounds + ' could not finish - step ' + res.missedStep +
+                          ' (' + shortLabel(steps[res.missedStep - 1] || {}) + ') ' + res.error +
+                          '. Stopped rather than leaving that one half-done and carrying on. ' +
+                          'Give the page longer, check that step\'s target, or set "If a step is ' +
+                          'missing" to skip it if it is genuinely optional.');
+          }
           if (followers.length) {
             /* Every follow-on step missing, pass after pass, means the flow has
              * broken rather than that one row was unusual. */
@@ -715,10 +740,19 @@ function runRepeatPass(step, index, steps, tabId) {
                             'behaving the way it did when you recorded. Stopped after ' + rounds + ' passes.');
             }
           }
-          return sleepInterruptible(cfg.delayMs).then(function (running2) {
-            if (!running2) return finish('Stopped by you after ' + rounds + ' pass(es).');
-            return round();
-          });
+          /* Only move on once whatever this pass opened has gone away again. */
+          return ask({ cmd: 'repeatSettle', pattern: cfg.pattern, timeoutMs: SETTLE_TIMEOUT_MS })
+            .then(function (s) {
+              if (s && s.ok !== false && s.settled === false) {
+                return finish('A dialog was still open ' + Math.round(SETTLE_TIMEOUT_MS / 1000) +
+                              ' seconds after pass ' + rounds + ' finished, so the next one would ' +
+                              'have clicked into a covered page. Stopped after ' + rounds + ' pass(es).');
+              }
+              return sleepInterruptible(cfg.delayMs).then(function (running2) {
+                if (!running2) return finish('Stopped by you after ' + rounds + ' pass(es).');
+                return round();
+              });
+            });
         });
       });
     });

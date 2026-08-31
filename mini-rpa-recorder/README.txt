@@ -137,7 +137,9 @@ WORKED EXAMPLE
   5. Set "Max repeats" (default 25) and "Delay between repeats" in seconds
      (default 2.0). If confirming the action needs a dialog or a second click,
      set "Steps in each pass" to cover those steps too and check the list of
-     steps shown underneath matches what one turn of the loop should do.
+     steps shown underneath matches what one turn of the loop should do. Leave
+     "If a step in the pass is missing" on "Stop and tell me" unless one of
+     those steps is genuinely optional.
   6. Press Play. The status line shows a live counter:
 
          Repeat 12 of up to 25
@@ -164,9 +166,28 @@ first, and anything the page has marked hidden or inert behind it is not treated
 as clickable. That stops a pass clicking a background button that happens to
 share its wording with the one in the dialog.
 
-If a step in the pass cannot be found within five seconds it is skipped and the
-pass carries on - some rows genuinely skip the dialog - and the count of skipped
-steps is reported at the end.
+A pass finishes before the next one starts. That matters most when a dialog is
+involved: the loop waits for it to close again before looking for the next
+element, because starting the next pass while the page is still covered means
+the click lands on nothing and, by the time the dialog does appear, it belongs
+to the wrong row. If a dialog is still up eight seconds after a pass ends, the
+loop stops and says so rather than clicking blind.
+
+"If a step in the pass is missing" decides what happens when a step cannot be
+found - a dialog that never opened, a button that moved:
+
+  Stop and tell me (the default)
+      The pass waits ten seconds for the step, then stops the whole loop and
+      names the step, what it was looking for, and how long it waited. This is
+      usually what you want: a pass that did not finish means the action did not
+      happen either - the invitation was never sent, the dialog is still open -
+      and carrying on from there quietly does the wrong thing to every row after
+      it.
+
+  Skip it and carry on
+      The pass waits five seconds, skips that step, and moves on, reporting how
+      many steps it skipped at the end. Choose this only when a step really is
+      optional on some rows.
 
 The loop stops when any of these happens:
 
@@ -180,6 +201,8 @@ The loop stops when any of these happens:
     Either way it reports "Clicks are not having an effect - stopped after N
     rounds." This is what stops it spinning forever on a page that quietly
     ignores simulated clicks.
+  - a step in the pass cannot be found and "If a step is missing" is set to stop;
+  - a dialog is still open eight seconds after a pass finished;
   - the follow-on steps in a pass stop being found altogether, which means the
     page is no longer behaving the way it did when you recorded.
 
