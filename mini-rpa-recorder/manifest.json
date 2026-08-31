@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Mini RPA Recorder",
+  "version": "1.0.0",
+  "description": "Record clicks and typing across your browser tabs, then replay them automatically.",
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Mini RPA Recorder",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["storage", "scripting", "sidePanel"],
+  "host_permissions": ["<all_urls>"]
+}

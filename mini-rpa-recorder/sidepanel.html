@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini RPA Recorder</title>
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1 class="title">Mini RPA Recorder</h1>
+  <div id="statusLine" class="status status-idle">
+    <span id="statusMode" class="status-mode">Idle</span>
+    <span id="statusDetail" class="status-detail"></span>
+  </div>
+  <div id="repeatLine" class="repeat-line" hidden></div>
+</header>
+
+<section class="controls" aria-label="Controls">
+  <div class="btn-row">
+    <button type="button" id="btnStart" class="btn btn-rec">Start Recording</button>
+    <button type="button" id="btnStopRec" class="btn">Stop Recording</button>
+  </div>
+  <div class="btn-row">
+    <button type="button" id="btnShot" class="btn">Screenshot</button>
+    <button type="button" id="btnClear" class="btn btn-danger">Clear</button>
+  </div>
+  <div class="btn-row">
+    <button type="button" id="btnPlay" class="btn btn-play">Play</button>
+    <button type="button" id="btnStopPlay" class="btn">Stop Playback</button>
+  </div>
+</section>
+
+<div id="notice" class="notice" hidden></div>
+<div id="skipped" class="notice notice-warn" hidden></div>
+<div id="sizeWarn" class="notice notice-warn" hidden></div>
+
+<section class="steps" aria-label="Recorded steps">
+  <div class="steps-head">
+    <h2 class="steps-title">Recorded steps</h2>
+    <span id="stepCount" class="pill">0</span>
+  </div>
+  <p id="emptyMsg" class="empty">
+    Nothing recorded yet. Press <strong>Start Recording</strong>, then use your tabs as normal.
+  </p>
+  <ol id="stepList" class="step-list"></ol>
+</section>
+
+<footer class="foot">
+  <p><strong>Safety limits.</strong> Repeat mode never goes above <strong>100</strong> repeats and never
+  waits less than <strong>0.5&nbsp;seconds</strong> between clicks. Many sites' terms of service restrict
+  automated activity, and rapid bulk actions can get an account rate-limited or restricted &mdash; the
+  floor and the ceiling exist to keep you well clear of that.</p>
+</footer>
+
+<script src="sidepanel.js"></script>
+</body>
+</html>
