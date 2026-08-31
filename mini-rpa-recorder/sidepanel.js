@@ -28,7 +28,8 @@
     sizeWarn: document.getElementById('sizeWarn'),
     list: document.getElementById('stepList'),
     empty: document.getElementById('emptyMsg'),
-    count: document.getElementById('stepCount')
+    count: document.getElementById('stepCount'),
+    selectBar: document.getElementById('selectBar')
   };
 
   var steps = [];
@@ -38,6 +39,7 @@
   var clearArmed = false;
   var clearTimer = null;
   var countTimers = {};
+  var selected = {};        /* step ids ticked for grouping */
 
   /* ------------------------------------------------------------ messaging */
 
@@ -235,7 +237,6 @@
       pattern: derivePattern(step),
       maxRepeats: DEFAULT_MAX_REPEATS,
       delaySeconds: DEFAULT_DELAY_SECONDS,
-      groupSize: 1,
       onMissing: 'stop'
     };
   }
@@ -244,11 +245,33 @@
     return (step.repeat && step.repeat.onMissing) === 'skip' ? 'skip' : 'stop';
   }
 
-  function groupSizeOf(step) {
-    var n = step.repeat && step.repeat.groupSize;
-    n = parseInt(n, 10);
-    if (isNaN(n) || n < 1) n = 1;
-    return n;
+  function setSizeOf(step) {
+    if (step && step.set && step.set.size > 0) return Math.round(step.set.size);
+    if (step && step.repeat && step.repeat.groupSize > 0) return Math.round(step.repeat.groupSize);
+    return 1;
+  }
+
+  function setNameOf(step, index) {
+    if (step && step.set && squash(step.set.name)) return step.set.name;
+    var size = Math.min(setSizeOf(step), steps.length - index);
+    var last = steps[index + size - 1];
+    var head = describe(step).replace(/^Clicked \w+ /, '').replace(/^'|'$/g, '');
+    if (size < 2 || !last) return trunc(head, 30);
+    var tail = describe(last).replace(/^Clicked \w+ /, '').replace(/^'|'$/g, '');
+    return trunc(head, 22) + ' → ' + trunc(tail, 22);
+  }
+
+  /* A set is anchored on its first step; the ones it covers are drawn inside
+   * it rather than as rows of their own. */
+  function setMemberIds() {
+    var inside = {};
+    for (var i = 0; i < steps.length; i++) {
+      var size = Math.min(setSizeOf(steps[i]), steps.length - i);
+      if (size < 2) continue;
+      for (var j = i + 1; j < i + size; j++) inside[steps[j].id] = steps[i].id;
+      i += size - 1;
+    }
+    return inside;
   }
 
   function stepIndexById(id) {
@@ -296,7 +319,7 @@
     el.btnPlay.disabled = mode !== 'idle' || steps.length === 0;
     el.btnStopPlay.disabled = mode !== 'playing';
     el.btnClear.disabled = mode !== 'idle' || steps.length === 0;
-    if (mode !== 'idle') disarmClear();
+    if (mode !== 'idle') { disarmClear(); selected = {}; }
   }
 
   /* --------------------------------------------------------------- notices */
@@ -351,7 +374,8 @@
   function renderKey() {
     return steps.map(function (s) {
       return s.id + ':' + s.type + ':' + (s.repeat && s.repeat.enabled ? '1' : '0') +
-             ':' + (s.repeat && s.repeat.enabled ? groupSizeOf(s) : 0);
+             ':' + setSizeOf(s) + ':' + (s.set && s.set.collapsed ? 'c' : 'o') +
+             ':' + (selected[s.id] ? 's' : '');
     }).join('|') + '#' + mode;
   }
 
@@ -383,11 +407,16 @@
     return wrap;
   }
 
-  function buildRepeatBox(step) {
-    var box = document.createElement('div');
-    box.className = 'repeat-box';
-    var r = step.repeat || {};
+  /* ---- one action set, drawn as a single card ------------------------- */
 
+  function buildAdvanced(step) {
+    var wrap = document.createElement('details');
+    wrap.className = 'advanced';
+    var sum = document.createElement('summary');
+    sum.textContent = 'Match pattern and timing';
+    wrap.appendChild(sum);
+
+    var r = step.repeat || {};
     var pattern = document.createElement('input');
     pattern.type = 'text';
     pattern.value = r.pattern || '';
@@ -395,37 +424,26 @@
     pattern.dataset.fkey = step.id + ':pattern';
     pattern.dataset.role = 'pattern';
     pattern.dataset.id = step.id;
-    box.appendChild(makeField('Match pattern', pattern));
+    wrap.appendChild(makeField('Which elements to loop over', pattern));
 
     var hint = document.createElement('p');
     hint.className = 'hint';
     hint.textContent = 'A CSS selector. ';
     var code = document.createElement('code');
-    code.textContent = 'tag:text("exact words")';
+    code.textContent = ':text("exact words")';
     hint.appendChild(code);
-    hint.appendChild(document.createTextNode(' matches by visible text, and '));
+    hint.appendChild(document.createTextNode(' matches by visible wording and '));
     var code2 = document.createElement('code');
     code2.textContent = ':text^("leading words")';
     hint.appendChild(code2);
     hint.appendChild(document.createTextNode(
-      ' by the start of it — useful because the wording is often what says whether a row ' +
-      'still needs doing. Position-based patterns (nth-of-type, nth-child) are not allowed ' +
-      'here — the list shifts after every click.'));
-    box.appendChild(hint);
+      ' by the start of it — often what says whether a row still needs doing. ' +
+      'Position-based patterns (nth-of-type, nth-child) are not allowed: the list ' +
+      'shifts after every click.'));
+    wrap.appendChild(hint);
 
     var twoUp = document.createElement('div');
     twoUp.className = 'two-up';
-
-    var maxInput = document.createElement('input');
-    maxInput.type = 'number';
-    maxInput.min = '1';
-    maxInput.max = String(MAX_REPEATS_CEILING);
-    maxInput.step = '1';
-    maxInput.value = String(r.maxRepeats == null ? DEFAULT_MAX_REPEATS : r.maxRepeats);
-    maxInput.dataset.fkey = step.id + ':max';
-    maxInput.dataset.role = 'max';
-    maxInput.dataset.id = step.id;
-    twoUp.appendChild(makeField('Max repeats', maxInput));
 
     var delayInput = document.createElement('input');
     delayInput.type = 'number';
@@ -435,26 +453,7 @@
     delayInput.dataset.fkey = step.id + ':delay';
     delayInput.dataset.role = 'delay';
     delayInput.dataset.id = step.id;
-    twoUp.appendChild(makeField('Delay (seconds)', delayInput));
-
-    box.appendChild(twoUp);
-
-    /* A pass is usually more than one click: on a lot of pages the row button
-     * opens a dialog, and confirming inside it is part of the same unit of
-     * work. Those steps are already recorded - this just says how many of them
-     * belong to each turn of the loop. */
-    var groupInput = document.createElement('input');
-    groupInput.type = 'number';
-    groupInput.min = '1';
-    groupInput.step = '1';
-    var here = stepIndexById(step.id);
-    var maxGroup = here < 0 ? 1 : steps.length - here;
-    groupInput.max = String(maxGroup);
-    groupInput.value = String(Math.min(groupSizeOf(step), maxGroup));
-    groupInput.dataset.fkey = step.id + ':group';
-    groupInput.dataset.role = 'group';
-    groupInput.dataset.id = step.id;
-    box.appendChild(makeField('Steps in each pass', groupInput));
+    twoUp.appendChild(makeField('Wait between loops (s)', delayInput));
 
     var missing = document.createElement('select');
     missing.dataset.fkey = step.id + ':missing';
@@ -467,77 +466,186 @@
       if (pair[0] === onMissingOf(step)) opt.selected = true;
       missing.appendChild(opt);
     });
-    box.appendChild(makeField('If a step in the pass is missing', missing));
-
-    var missingHint = document.createElement('p');
-    missingHint.className = 'hint';
-    missingHint.textContent = 'Stopping is usually what you want: a pass that did not finish means ' +
-      'the action did not happen either, and carrying on from there does the wrong thing to every ' +
-      'row after it. Choose skip only when a step is genuinely optional on some rows.';
-    box.appendChild(missingHint);
-
-    var preview = document.createElement('div');
-    preview.className = 'pass-preview';
-    preview.dataset.passFor = step.id;
-    box.appendChild(preview);
-    fillPassPreview(preview, step);
+    twoUp.appendChild(makeField('If a step is missing', missing));
+    wrap.appendChild(twoUp);
 
     var limits = document.createElement('p');
     limits.className = 'hint';
-    limits.textContent = 'Capped at ' + MAX_REPEATS_CEILING + ' repeats and a ' + DELAY_FLOOR_SECONDS +
-      ' second minimum delay, whatever you type. Sites rate-limit rapid automated clicking and some ' +
-      'restrict accounts for it, so these limits stay in force.';
-    box.appendChild(limits);
-
-    var readout = document.createElement('div');
-    readout.className = 'readout';
-    readout.dataset.readoutFor = step.id;
-    readout.textContent = 'Checking the active tab…';
-    box.appendChild(readout);
-
-    return box;
+    limits.textContent = 'Whatever you type, a loop never runs more than ' + MAX_REPEATS_CEILING +
+      ' times or waits less than ' + DELAY_FLOOR_SECONDS + ' seconds between turns. Sites rate-limit ' +
+      'rapid automated clicking and some restrict accounts for it.';
+    wrap.appendChild(limits);
+    return wrap;
   }
 
-  /* Spells out exactly which recorded steps one turn of the loop will run, so
-   * the pass length is not a number the user has to picture in their head. */
-  function fillPassPreview(node, step) {
-    node.textContent = '';
-    var here = stepIndexById(step.id);
-    if (here < 0) return;
-    var size = Math.min(groupSizeOf(step), steps.length - here);
-    var head = document.createElement('div');
-    head.className = 'pass-head';
-    head.textContent = size === 1
-      ? 'Each pass: one click on a matching element.'
-      : 'Each pass runs steps ' + (here + 1) + '–' + (here + size) + ':';
-    node.appendChild(head);
-    if (size === 1) return;
-    var ol = document.createElement('ol');
-    ol.className = 'pass-list';
-    for (var i = here; i < here + size; i++) {
-      var li = document.createElement('li');
-      li.textContent = (i === here ? 'the matching element — ' : '') + describe(steps[i]);
-      ol.appendChild(li);
-    }
-    node.appendChild(ol);
-  }
-
-  function buildStep(step, index) {
+  function buildSetCard(step, index, size) {
     var li = document.createElement('li');
-    li.className = 'step type-' + step.type;
+    var looping = !!(step.repeat && step.repeat.enabled);
+    var collapsed = !!(step.set && step.set.collapsed);
+    li.className = 'set' + (looping ? ' set-looping' : '') + (collapsed ? ' set-collapsed' : '');
+    li.dataset.id = step.id;
+
+    /* ---- header ---- */
+    var head = document.createElement('div');
+    head.className = 'set-head';
+
+    var chev = document.createElement('button');
+    chev.type = 'button';
+    chev.className = 'chev';
+    chev.dataset.role = 'collapse';
+    chev.dataset.id = step.id;
+    chev.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    chev.title = collapsed ? 'Show the steps in this set' : 'Hide the steps in this set';
+    chev.textContent = collapsed ? '▸' : '▾';
+    head.appendChild(chev);
+
+    var title = document.createElement('span');
+    title.className = 'set-title';
+    title.textContent = setNameOf(step, index);
+    head.appendChild(title);
+
+    var count = document.createElement('span');
+    count.className = 'set-count';
+    count.textContent = size === 1 ? 'step ' + (index + 1)
+                                   : size + ' steps · ' + (index + 1) + '–' + (index + size);
+    head.appendChild(count);
+
+    var loopBtn = document.createElement('button');
+    loopBtn.type = 'button';
+    loopBtn.className = 'loop-btn' + (looping ? ' on' : '');
+    loopBtn.dataset.role = 'loop';
+    loopBtn.dataset.id = step.id;
+    loopBtn.setAttribute('aria-pressed', looping ? 'true' : 'false');
+    loopBtn.textContent = looping ? '⟳ Looping' : '⟳ Loop';
+    loopBtn.title = step.type === 'click'
+      ? 'Run this set once for every matching element on the page'
+      : 'Looping needs the set to start with a click';
+    if (step.type !== 'click') loopBtn.disabled = true;
+    head.appendChild(loopBtn);
+
+    li.appendChild(head);
+
+    /* ---- looping controls, right under the header where they belong ---- */
+    if (looping) {
+      var bar = document.createElement('div');
+      bar.className = 'loop-bar';
+
+      var label = document.createElement('span');
+      label.textContent = 'Repeat up to';
+      bar.appendChild(label);
+
+      var times = document.createElement('input');
+      times.type = 'number';
+      times.min = '1';
+      times.max = String(MAX_REPEATS_CEILING);
+      times.step = '1';
+      times.className = 'loop-times';
+      times.value = String((step.repeat && step.repeat.maxRepeats) || DEFAULT_MAX_REPEATS);
+      times.dataset.fkey = step.id + ':max';
+      times.dataset.role = 'max';
+      times.dataset.id = step.id;
+      bar.appendChild(times);
+
+      var suffix = document.createElement('span');
+      suffix.textContent = 'times';
+      bar.appendChild(suffix);
+
+      var checkBtn = document.createElement('button');
+      checkBtn.type = 'button';
+      checkBtn.className = 'check-btn';
+      checkBtn.dataset.role = 'check';
+      checkBtn.dataset.id = step.id;
+      checkBtn.textContent = 'Show me on the page';
+      checkBtn.title = 'Outline every element this loop would act on, without clicking any of them';
+      bar.appendChild(checkBtn);
+
+      li.appendChild(bar);
+
+      var readout = document.createElement('div');
+      readout.className = 'readout';
+      readout.dataset.readoutFor = step.id;
+      readout.textContent = 'Checking the active tab…';
+      li.appendChild(readout);
+    }
+
+    /* ---- the steps themselves ---- */
+    if (!collapsed) {
+      var body = document.createElement('ol');
+      body.className = 'set-body';
+      for (var i = index; i < index + size; i++) {
+        body.appendChild(buildStepRow(steps[i], i, true));
+      }
+      li.appendChild(body);
+
+      var foot = document.createElement('div');
+      foot.className = 'set-foot';
+      if (looping) foot.appendChild(buildAdvanced(step));
+
+      /* A set built in the wrong order should be fixable in place, rather than
+       * having to ungroup and start over - and a set of one that is already
+       * looping has no tick box to group it with the next step. */
+      var edit = document.createElement('div');
+      edit.className = 'set-edit';
+      if (index + size < steps.length) {
+        var add = document.createElement('button');
+        add.type = 'button';
+        add.className = 'link-btn';
+        add.dataset.role = 'grow';
+        add.dataset.id = step.id;
+        add.textContent = '+ Add step ' + (index + size + 1) + ' to this set';
+        edit.appendChild(add);
+      }
+      if (size > 1) {
+        var shrink = document.createElement('button');
+        shrink.type = 'button';
+        shrink.className = 'link-btn';
+        shrink.dataset.role = 'shrink';
+        shrink.dataset.id = step.id;
+        shrink.textContent = '− Drop step ' + (index + size);
+        edit.appendChild(shrink);
+
+        var ungroup = document.createElement('button');
+        ungroup.type = 'button';
+        ungroup.className = 'link-btn';
+        ungroup.dataset.role = 'ungroup';
+        ungroup.dataset.id = step.id;
+        ungroup.textContent = 'Ungroup';
+        edit.appendChild(ungroup);
+      }
+      foot.appendChild(edit);
+      li.appendChild(foot);
+    }
+
+    return li;
+  }
+
+  /* ---- one ordinary step row ------------------------------------------ */
+
+  function buildStepRow(step, index, insideSet) {
+    var li = document.createElement('li');
+    li.className = 'step type-' + step.type + (insideSet ? ' in-set' : '');
     li.dataset.id = step.id;
     if (mode === 'playing' && play && play.index === index) li.className += ' step-current';
 
     var main = document.createElement('div');
     main.className = 'step-main';
 
+    if (!insideSet && mode === 'idle') {
+      var pick = document.createElement('input');
+      pick.type = 'checkbox';
+      pick.className = 'pick';
+      pick.checked = !!selected[step.id];
+      pick.dataset.role = 'select';
+      pick.dataset.id = step.id;
+      pick.setAttribute('aria-label', 'Select step ' + (index + 1) + ' for grouping');
+      main.appendChild(pick);
+    }
+
     var idx = document.createElement('span');
     idx.className = 'idx';
     idx.textContent = (index + 1) + '.';
     main.appendChild(idx);
 
-    /* Tab switches read as a sentence of their own; everything else carries a
-     * chip naming the page it belongs to. */
     if (step.type !== 'switchTab') {
       var chip = document.createElement('span');
       chip.className = 'chip';
@@ -550,6 +658,21 @@
     desc.className = 'desc';
     desc.textContent = describe(step);
     main.appendChild(desc);
+
+    /* Looping a single step should not require grouping it with anything, so
+     * a click step carries its own Loop button; pressing it promotes the row
+     * to a set card of one. */
+    if (!insideSet && step.type === 'click' && mode === 'idle') {
+      var loop = document.createElement('button');
+      loop.type = 'button';
+      loop.className = 'loop-mini';
+      loop.dataset.role = 'loop';
+      loop.dataset.id = step.id;
+      loop.setAttribute('aria-pressed', 'false');
+      loop.title = 'Run this click once for every matching element on the page';
+      loop.textContent = '⟳ Loop';
+      main.appendChild(loop);
+    }
 
     var x = document.createElement('button');
     x.type = 'button';
@@ -570,30 +693,57 @@
       img.alt = 'Screenshot taken on ' + tabName(step);
       li.appendChild(img);
     }
-
-    if (step.type === 'click') {
-      var on = !!(step.repeat && step.repeat.enabled);
-      var toggle = document.createElement('label');
-      toggle.className = 'repeat-toggle' + (on ? ' on' : '');
-      var cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = on;
-      cb.dataset.role = 'toggle';
-      cb.dataset.id = step.id;
-      toggle.appendChild(cb);
-      toggle.appendChild(document.createTextNode('Repeat on every matching element'));
-      li.appendChild(toggle);
-      if (on) li.appendChild(buildRepeatBox(step));
-    }
-
     return li;
   }
+
+  /* ---- the selection bar ---------------------------------------------- */
+
+  function renderSelectionBar() {
+    var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
+    var bar = el.selectBar;
+    if (!ids.length || mode !== 'idle') { bar.hidden = true; bar.textContent = ''; return; }
+    bar.hidden = false;
+    bar.textContent = '';
+
+    var idxs = ids.map(stepIndexById).filter(function (i) { return i >= 0; }).sort(function (a, b) { return a - b; });
+    var contiguous = idxs.length > 1 && idxs[idxs.length - 1] - idxs[0] === idxs.length - 1;
+
+    var text = document.createElement('span');
+    text.className = 'sel-text';
+    text.textContent = idxs.length + (idxs.length === 1 ? ' step selected' : ' steps selected');
+    bar.appendChild(text);
+
+    var group = document.createElement('button');
+    group.type = 'button';
+    group.className = 'btn btn-play sel-go';
+    group.dataset.role = 'group';
+    group.textContent = 'Group into an action set';
+    group.disabled = !contiguous;
+    bar.appendChild(group);
+
+    var clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'link-btn';
+    clear.dataset.role = 'clearsel';
+    clear.textContent = 'Clear';
+    bar.appendChild(clear);
+
+    if (!contiguous) {
+      var why = document.createElement('p');
+      why.className = 'hint';
+      why.textContent = idxs.length < 2
+        ? 'Tick at least two steps that sit next to each other.'
+        : 'Those steps are not next to each other. A set runs as one unbroken sequence, ' +
+          'so pick a run of steps with no gaps.';
+      bar.appendChild(why);
+    }
+  }
+
+  /* ---- the list ------------------------------------------------------- */
 
   function renderList(force) {
     var key = renderKey();
     if (!force && key === lastRenderKey) {
-      /* Only repeat-field values changed, and the inputs already show them.
-       * Re-rendering here would fight the user's cursor. */
       highlightCurrent();
       return;
     }
@@ -601,15 +751,24 @@
 
     var snap = captureFocus();
     el.list.textContent = '';
-    steps.forEach(function (step, i) {
-      el.list.appendChild(buildStep(step, i));
-    });
+    var inside = setMemberIds();
+    for (var i = 0; i < steps.length; i++) {
+      var step = steps[i];
+      if (inside[step.id]) continue;                     /* drawn inside its set */
+      var size = Math.min(setSizeOf(step), steps.length - i);
+      var looping = !!(step.repeat && step.repeat.enabled);
+      if (size > 1 || looping) {
+        el.list.appendChild(buildSetCard(step, i, size));
+        i += size - 1;
+      } else {
+        el.list.appendChild(buildStepRow(step, i, false));
+      }
+    }
     el.empty.hidden = steps.length > 0;
     el.count.textContent = String(steps.length);
     restoreFocus(snap);
+    renderSelectionBar();
 
-    /* The read-out is a design-time helper; during a run the page is busy and
-     * the live counter in the status bar is the thing to watch. */
     if (mode !== 'playing') {
       steps.forEach(function (step) {
         if (step.repeat && step.repeat.enabled) refreshCount(step.id, step.repeat.pattern);
@@ -627,6 +786,11 @@
   }
 
   /* ------------------------------------------------- live "matches N" line */
+
+  function sentence(text) {
+    var t = squash(text);
+    return /[.!?]$/.test(t) ? t : t + '.';
+  }
 
   function setReadout(stepId, text, kind) {
     var node = el.list.querySelector('[data-readout-for="' + stepId + '"]');
@@ -646,7 +810,8 @@
       setReadout(stepId, 'Checking the active tab…');
       ask({ cmd: 'countMatches', pattern: pattern }).then(function (res) {
         if (!res || res.ok === false) {
-          setReadout(stepId, 'Cannot count right now: ' + ((res && res.error) || 'no answer from the page') + '.', 'error');
+          setReadout(stepId, sentence('Cannot count right now — ' +
+            ((res && res.error) || 'no answer from the page')), 'error');
           return;
         }
         var n = res.count;
@@ -671,10 +836,102 @@
     return actAndReport({ cmd: 'setRepeat', id: id, repeat: repeat });
   }
 
+  function saveSet(id, set) {
+    return actAndReport({ cmd: 'setGroup', id: id, set: set });
+  }
+
+  function clearSelection() {
+    selected = {};
+    renderList(true);
+  }
+
   el.list.addEventListener('click', function (e) {
     var target = e.target;
-    if (target && target.dataset && target.dataset.role === 'delete') {
-      actAndReport({ cmd: 'deleteStep', id: target.dataset.id });
+    if (!target || !target.dataset || !target.dataset.role) return;
+    var role = target.dataset.role;
+    var id = target.dataset.id;
+
+    if (role === 'delete') { actAndReport({ cmd: 'deleteStep', id: id }); return; }
+
+    if (role === 'collapse') {
+      var s = stepById(id);
+      if (!s) return;
+      var next = Object.assign({}, s.set || { size: setSizeOf(s) }, { collapsed: !(s.set && s.set.collapsed) });
+      saveSet(id, next);
+      return;
+    }
+
+    if (role === 'ungroup') {
+      saveSet(id, null);
+      return;
+    }
+
+    if (role === 'grow' || role === 'shrink') {
+      var owner = stepById(id);
+      var at = stepIndexById(id);
+      if (!owner || at < 0) return;
+      var cur = Math.min(setSizeOf(owner), steps.length - at);
+      var want = role === 'grow' ? cur + 1 : cur - 1;
+      want = Math.max(1, Math.min(want, steps.length - at));
+      saveSet(id, want < 2 && !(owner.repeat && owner.repeat.enabled)
+        ? null
+        : Object.assign({}, owner.set || {}, { size: want }));
+      return;
+    }
+
+    if (role === 'loop') {
+      var step = stepById(id);
+      if (!step || step.type !== 'click') return;
+      if (step.repeat && step.repeat.enabled) {
+        saveRepeat(id, Object.assign({}, step.repeat, { enabled: false }));
+      } else {
+        var previous = step.repeat && squash(step.repeat.pattern) ? step.repeat : null;
+        if (previous) {
+          saveRepeat(id, Object.assign({}, previous, { enabled: true }));
+        } else {
+          var fresh = defaultRepeat(step);
+          saveRepeat(id, fresh);
+          refinePattern(id, fresh.pattern, step.fallbackText);
+        }
+      }
+      return;
+    }
+
+    if (role === 'check') {
+      var owner = stepById(id);
+      if (!owner || !owner.repeat) return;
+      setReadout(id, 'Looking on the active tab…');
+      ask({ cmd: 'previewPattern', pattern: owner.repeat.pattern }).then(function (res) {
+        if (!res || res.ok === false) {
+          setReadout(id, sentence('Could not check — ' +
+            ((res && res.error) || 'no answer from the page')), 'error');
+          return;
+        }
+        var n = res.count;
+        var text = n === 0
+          ? 'Nothing on that page matches — the loop would do nothing.'
+          : 'Outlined ' + n + ' element' + (n === 1 ? '' : 's') + ' on ' + trunc(res.tabTitle, 26) +
+            '. Look at the page: those are exactly what the loop will act on' +
+            (res.labels && res.labels.length ? ' (' + res.labels.slice(0, 3).join(', ') + (n > 3 ? ', …' : '') + ')' : '') + '.';
+        setReadout(id, text, n === 0 ? 'none' : '');
+      });
+      return;
+    }
+  });
+
+  el.selectBar.addEventListener('click', function (e) {
+    var target = e.target;
+    if (!target || !target.dataset || !target.dataset.role) return;
+    if (target.dataset.role === 'clearsel') { clearSelection(); return; }
+    if (target.dataset.role === 'group') {
+      var idxs = Object.keys(selected).filter(function (k) { return selected[k]; })
+        .map(stepIndexById).filter(function (i) { return i >= 0; })
+        .sort(function (a, b) { return a - b; });
+      if (idxs.length < 2) return;
+      if (idxs[idxs.length - 1] - idxs[0] !== idxs.length - 1) return;
+      var anchor = steps[idxs[0]];
+      selected = {};
+      saveSet(anchor.id, { size: idxs.length, name: '', collapsed: false });
     }
   });
 
@@ -687,6 +944,11 @@
       saveRepeat(mStep.id, Object.assign({}, mStep.repeat, {
         enabled: true, onMissing: target.value === 'skip' ? 'skip' : 'stop'
       }));
+      return;
+    }
+    if (target.dataset.role === 'select') {
+      selected[target.dataset.id] = target.checked;
+      renderSelectionBar();
       return;
     }
     if (target.dataset.role !== 'toggle') return;
@@ -719,7 +981,7 @@
     var target = e.target;
     if (!target || !target.dataset || !target.dataset.role) return;
     var role = target.dataset.role;
-    if (role !== 'pattern' && role !== 'max' && role !== 'delay' && role !== 'group') return;
+    if (role !== 'pattern' && role !== 'max' && role !== 'delay') return;
 
     var step = stepById(target.dataset.id);
     if (!step) return;
@@ -729,7 +991,6 @@
       pattern: current.pattern,
       maxRepeats: current.maxRepeats,
       delaySeconds: current.delaySeconds,
-      groupSize: current.groupSize == null ? 1 : current.groupSize,
       onMissing: current.onMissing === 'skip' ? 'skip' : 'stop'
     };
 
@@ -739,14 +1000,6 @@
     } else if (role === 'max') {
       var m = parseInt(target.value, 10);
       updated.maxRepeats = isNaN(m) ? DEFAULT_MAX_REPEATS : Math.min(MAX_REPEATS_CEILING, Math.max(1, m));
-    } else if (role === 'group') {
-      var here = stepIndexById(step.id);
-      var maxGroup = here < 0 ? 1 : steps.length - here;
-      var g = parseInt(target.value, 10);
-      updated.groupSize = isNaN(g) ? 1 : Math.min(maxGroup, Math.max(1, g));
-      step.repeat = updated;
-      var node = el.list.querySelector('[data-pass-for="' + step.id + '"]');
-      if (node) fillPassPreview(node, step);
     } else {
       var d = parseFloat(target.value);
       updated.delaySeconds = isNaN(d) ? DEFAULT_DELAY_SECONDS : Math.max(DELAY_FLOOR_SECONDS, d);
@@ -761,12 +1014,11 @@
     var target = e.target;
     if (!target || !target.dataset) return;
     var role = target.dataset.role;
-    if (role !== 'max' && role !== 'delay' && role !== 'group') return;
+    if (role !== 'max' && role !== 'delay') return;
     var step = stepById(target.dataset.id);
     if (!step || !step.repeat) return;
     if (role === 'max') target.value = String(step.repeat.maxRepeats);
-    else if (role === 'delay') target.value = String(step.repeat.delaySeconds);
-    else target.value = String(groupSizeOf(step));
+    else target.value = String(step.repeat.delaySeconds);
   }, true);
 
   /* ------------------------------------------------------- main controls */
