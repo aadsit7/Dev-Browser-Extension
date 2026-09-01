@@ -94,12 +94,46 @@ between tabs.
 3. REPEAT MODE
 -------------------------------------------------------------------------------
 
-ACTION SETS
+IT SETS ITSELF UP
 
 On a lot of pages the real unit of work is more than one click: press the button
-on a row, confirm in the dialog that pops up, then scroll. Those steps are
-already in your recording, so you bundle them into an ACTION SET and the set
-becomes the thing that repeats.
+on a row, confirm in the dialog that pops up, move to the next row. That is a
+process meant to run down a whole list, not to happen once, so when you stop
+recording the extension works that out for itself.
+
+If the click you started with still matches other elements on the page, your
+steps are grouped into an ACTION SET and switched to looping for you, and the
+panel says so:
+
+    This looks like a repeating process, so it is set up to loop: those 2
+    steps run once for each match, and 8 elements match on this page right
+    now. Press Play to run it down the list - it scrolls to load more as it
+    goes. Press Looping to turn it off.
+
+So the whole job is: record Connect, confirm in the pop-out, stop, press Play.
+
+The click that leads the loop is the first one that turns out to have company on
+the page, not simply the first one you recorded. If you search, filter and then
+work the results, the search and the filter stay outside the set and run once,
+and the row click is what repeats - which is what you meant.
+
+What counts as "other elements" is deliberately strict. One match on its own
+proves nothing - it is as likely to be the button you just pressed, still
+sitting there, as another row. What settles it is a match that is demonstrably a
+DIFFERENT element, told apart by its aria-label, id, data-testid or name and
+never by its wording (the wording is the thing your click changes). Where a page
+gives its buttons nothing to tell them apart by, two or more matches is the best
+evidence available and that is what gets used. A one-off control - a Search
+button, a Save - is left exactly as recorded.
+
+Nothing is run for you. Setting it up and running it stay separate, and one
+press of "Looping" turns it back off.
+
+ACTION SETS BY HAND
+
+You can also build a set yourself, which is what you want when the recording
+covers more than one process, or when the click you started with is not the one
+that should repeat.
 
 To make one, tick two or more steps that sit next to each other and press
 "Group into an action set". They collapse into a single card showing what the
@@ -220,6 +254,13 @@ WORKED EXAMPLE
          Repeat 12 of up to 25
 
 HOW THE LOOP ACTUALLY RUNS
+
+When a pass finds nothing left to click, it scrolls to the bottom of the page,
+waits for whatever loads, and looks again - which is how an endless list keeps
+going. A scroll that actually pulls in more rows counts as progress, not as an
+attempt, so a long list can be loaded as many times as it takes. The limit of
+three only applies to scrolls in a row that reveal nothing, which is what the
+real end of a list looks like.
 
 Each pass re-queries the live page from scratch. It never holds on to an element
 it found last time, because after a click the list has usually re-rendered and

@@ -873,22 +873,31 @@ if (window.__miniRpaLoaded) {
      * element that was recorded. A list part-way through a job holds rows in
      * more than one state - some still to do, some already actioned - and an
      * attribute hook alone does not tell them apart. */
-    function analyzePattern(pattern, text, prefix) {
+    function analyzePattern(pattern, text, prefix, signature) {
       var nodes = queryPattern(pattern);
       var want = squash(text).toLowerCase();
       var head = squash(prefix || '').toLowerCase();
+      var mine = squash(signature || '');
       var withText = 0;
       var withPrefix = 0;
+      var elsewhere = 0;
       for (var i = 0; i < nodes.length; i++) {
         var t = visibleText(nodes[i]).toLowerCase();
         if (t === want) withText += 1;
         if (head && t.indexOf(head) === 0) withPrefix += 1;
+        /* Matches that are demonstrably a different element from the one that
+         * was recorded. Counting matches alone cannot tell "another row this
+         * applies to" from "the control I just clicked, still sitting there",
+         * and a list that has only loaded its first couple of rows shows just
+         * one of each. */
+        if (mine && signatureOf(nodes[i]) && signatureOf(nodes[i]) !== mine) elsewhere += 1;
       }
       return {
         ok: true, count: nodes.length,
         withText: withText, withPrefix: withPrefix,
         others: nodes.length - withText,
-        othersPrefix: nodes.length - withPrefix
+        othersPrefix: nodes.length - withPrefix,
+        elsewhere: elsewhere
       };
     }
 
@@ -1034,7 +1043,7 @@ if (window.__miniRpaLoaded) {
         return;
       }
       if (msg.cmd === 'analyzePattern') {
-        try { sendResponse(analyzePattern(msg.pattern, msg.text, msg.prefix)); }
+        try { sendResponse(analyzePattern(msg.pattern, msg.text, msg.prefix, msg.signature)); }
         catch (e) { sendResponse({ ok: false, error: e.message }); }
         return;
       }

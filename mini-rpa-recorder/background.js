@@ -778,12 +778,22 @@ function runRepeatPass(step, index, steps, tabId) {
                           ' scroll-to-load attempts) - stopped after ' + rounds + ' pass(es).');
           }
           rescues += 1;
+          var before = out.countBefore;
           return setPlay({
             repeatNote: 'nothing left in view - scrolling down to load more (attempt ' +
                         rescues + ' of ' + RESCUE_LIMIT + ')'
           }).then(function () {
             return ask({ cmd: 'repeatRescue', pattern: cfg.pattern });
-          }).then(function () {
+          }).then(function (res) {
+            /* A scroll that actually pulled in more rows is progress, not an
+             * attempt against the limit. The limit is there to stop fruitless
+             * scrolling at the end of a list; a long list can legitimately
+             * need loading many times over, and counting those would cut the
+             * run short in the middle of a list that is still growing. */
+            if (res && res.ok !== false && typeof res.count === 'number' &&
+                res.count > before) {
+              rescues = 0;
+            }
             lastCount = -1;
             stall = 0;
             return round();
@@ -1047,7 +1057,7 @@ function takeScreenshot() {
 
 /* --------------------------------------------------------------- messaging */
 
-function analyzePattern(pattern, text, prefix) {
+function analyzePattern(pattern, text, prefix, signature) {
   if (!String(pattern || '').trim()) {
     return Promise.resolve({ ok: false, error: 'No pattern to analyse.' });
   }
@@ -1056,7 +1066,8 @@ function analyzePattern(pattern, text, prefix) {
       return { ok: false, error: 'No usable page in the active tab.' };
     }
     return ensureContentScript(tab.id).then(function () {
-      return sendToTab(tab.id, { cmd: 'analyzePattern', pattern: pattern, text: text, prefix: prefix });
+      return sendToTab(tab.id, { cmd: 'analyzePattern', pattern: pattern, text: text,
+                                 prefix: prefix, signature: signature });
     }).then(function (out) {
       return out || { ok: false, error: 'The page did not answer.' };
     }).catch(function (e) {
@@ -1208,7 +1219,7 @@ function handleMessage(msg, sender) {
       return countMatches(msg.pattern);
 
     case 'analyzePattern':
-      return analyzePattern(msg.pattern, msg.text, msg.prefix);
+      return analyzePattern(msg.pattern, msg.text, msg.prefix, msg.signature);
 
     case 'previewPattern':
       return previewPattern(msg.pattern);
