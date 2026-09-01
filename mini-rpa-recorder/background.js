@@ -376,8 +376,37 @@ function noteTab(tab) {
   return serialize(function () { return noteTabRaw(tab); });
 }
 
+/* Puts the content script into every tab that will take it, and reports the
+ * ones that will not. Shared by recording and by re-recording a single step,
+ * because both need the same reach. */
+function injectIntoAllTabs() {
+  return chrome.tabs.query({}).then(function (tabs) {
+    var skipped = [];
+    var ready = 0;
+    var chain = Promise.resolve();
+    tabs.forEach(function (tab) {
+      chain = chain.then(function () {
+        var block = injectionBlockReason(tab.url);
+        if (block) {
+          skipped.push({ title: tab.title || tab.url || 'Untitled tab', reason: block });
+          return null;
+        }
+        return chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] })
+          .then(function () { ready += 1; })
+          .catch(function (e) {
+            skipped.push({ title: tab.title || tab.url, reason: errText(e) });
+          });
+      });
+    });
+    return chain.then(function () {
+      return chrome.storage.local.set({ skipped: skipped })
+        .then(function () { return { ready: ready, skipped: skipped }; });
+    });
+  });
+}
+
 function startRecording() {
-  return chrome.storage.local.set({ mode: 'recording', skipped: [] })
+  return chrome.storage.local.set({ mode: 'recording', skipped: [], redoStepId: null })
     .then(function () { return chrome.storage.session.set({ play: null }); })
     .then(getActiveTab)
     .then(function (active) {
@@ -385,42 +414,90 @@ function startRecording() {
        * recording does not open with a pointless "switched to" step. */
       return chrome.storage.session.set({ lastTabId: active ? active.id : null });
     })
-    .then(function () { return chrome.tabs.query({}); })
-    .then(function (tabs) {
-      var skipped = [];
-      var ready = 0;
-      var chain = Promise.resolve();
-      tabs.forEach(function (tab) {
-        chain = chain.then(function () {
-          var block = injectionBlockReason(tab.url);
-          if (block) {
-            skipped.push({ title: tab.title || tab.url || 'Untitled tab', reason: block });
-            return null;
-          }
-          return chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] })
-            .then(function () { ready += 1; })
-            .catch(function (e) {
-              skipped.push({ title: tab.title || tab.url, reason: errText(e) });
-            });
-        });
-      });
-      return chain.then(function () {
-        return chrome.storage.local.set({ skipped: skipped }).then(function () {
-          var msg = 'Recording. Ready on ' + ready + ' tab' + (ready === 1 ? '' : 's') + '.';
-          if (skipped.length) {
-            msg += ' ' + skipped.length + ' tab' + (skipped.length === 1 ? ' was' : 's were') +
-                   ' skipped (listed below).';
-          }
-          return notice(msg, skipped.length ? 'warn' : 'info');
-        });
-      });
+    .then(injectIntoAllTabs)
+    .then(function (r) {
+      var msg = 'Recording. Ready on ' + r.ready + ' tab' + (r.ready === 1 ? '' : 's') + '.';
+      if (r.skipped.length) {
+        msg += ' ' + r.skipped.length + ' tab' + (r.skipped.length === 1 ? ' was' : 's were') +
+               ' skipped (listed below).';
+      }
+      return notice(msg, r.skipped.length ? 'warn' : 'info');
     });
+}
+
+/* Re-record one step in place. The step keeps its identity, so whatever action
+ * set it belongs to is untouched; only what it does changes. */
+function startRedo(id) {
+  return getLocal('steps').then(function (d) {
+    var steps = Array.isArray(d.steps) ? d.steps : [];
+    var at = -1;
+    for (var i = 0; i < steps.length; i++) if (steps[i].id === id) { at = i; break; }
+    if (at < 0) return { ok: false, error: 'That step is no longer in the recording.' };
+    return chrome.storage.local.set({ mode: 'redo', redoStepId: id })
+      .then(injectIntoAllTabs)
+      .then(function () {
+        return notice('Re-recording step ' + (at + 1) + '. Go to the page and do that one ' +
+                      'action — the next thing you do replaces it, and recording stops there.',
+                      'info');
+      })
+      .then(function () { return { ok: true }; });
+  });
+}
+
+function cancelRedo() {
+  return chrome.storage.local.set({ mode: 'idle', redoStepId: null })
+    .then(function () { return notice('Re-recording cancelled — the step is unchanged.', 'info'); })
+    .then(function () { return { ok: true }; });
+}
+
+/* Swaps the newly recorded action into the slot, keeping the step's id and its
+ * place in any action set. A loop on the old step referred to the old element,
+ * so its pattern is cleared and flagged to be worked out again rather than
+ * left pointing at something that is no longer there. */
+function applyRedo(step) {
+  return serialize(function () {
+    /* Re-read under the lock: only the first action of the redo may land, even
+     * if two events were already in flight. */
+    return getLocal(['mode', 'redoStepId', 'steps']).then(function (s) {
+      if (s.mode !== 'redo' || !s.redoStepId) return { ok: false, error: 'not re-recording' };
+      var steps = Array.isArray(s.steps) ? s.steps.slice() : [];
+      var at = -1;
+      for (var i = 0; i < steps.length; i++) if (steps[i].id === s.redoStepId) { at = i; break; }
+      if (at < 0) {
+        return chrome.storage.local.set({ mode: 'idle', redoStepId: null })
+          .then(function () { return { ok: false, error: 'that step has gone' }; });
+      }
+      var old = steps[at];
+      var next = Object.assign({}, step, {
+        id: old.id,
+        set: old.set || null,
+        repeat: null,
+        coalesceKey: null
+      });
+      var note = 'Step ' + (at + 1) + ' replaced with: ' + shortLabel(next) + '.';
+      if (old.repeat && old.repeat.enabled) {
+        if (next.type === 'click') {
+          next.repeat = Object.assign({}, old.repeat, { pattern: '' });
+          next.needsPattern = true;
+          note += ' Its loop is kept, and the match pattern is being worked out again from the ' +
+                  'new element — check the count before playing.';
+        } else {
+          note += ' Its loop was switched off, because what replaced it is not a click.';
+        }
+      }
+      steps[at] = next;
+      return chrome.storage.local.set({ mode: 'idle', redoStepId: null })
+        .then(function () { return saveSteps(steps); })
+        .then(function () { return notice(note, 'ok'); })
+        .then(function () { return { ok: true }; });
+    });
+  });
 }
 
 function stopRecording() {
   return getLocal('steps').then(function (d) {
     var n = Array.isArray(d.steps) ? d.steps.length : 0;
-    return chrome.storage.local.set({ mode: 'idle' }).then(function () {
+    return chrome.storage.local.set({ mode: 'idle', redoStepId: null }).then(function () {
       return notice('Recording stopped. ' + n + ' step' + (n === 1 ? '' : 's') + ' saved.', 'info');
     });
   });
@@ -1062,6 +1139,12 @@ function handleMessage(msg, sender) {
     case 'stopRecording':
       return stopRecording().then(function () { return { ok: true }; });
 
+    case 'startRedo':
+      return startRedo(msg.id);
+
+    case 'cancelRedo':
+      return cancelRedo();
+
     case 'screenshot':
       return takeScreenshot();
 
@@ -1108,7 +1191,7 @@ function handleMessage(msg, sender) {
       });
 
     case 'setRepeat':
-      return updateStep(msg.id, { repeat: msg.repeat || null });
+      return updateStep(msg.id, { repeat: msg.repeat || null, needsPattern: false });
 
     case 'restoreSteps':
       return serialize(function () {
@@ -1132,13 +1215,14 @@ function handleMessage(msg, sender) {
 
     case 'recordStep':
       return getLocal('mode').then(function (d) {
-        if (d.mode !== 'recording') return { ok: false, error: 'not recording' };
+        if (d.mode !== 'recording' && d.mode !== 'redo') return { ok: false, error: 'not recording' };
         var step = msg.step || {};
         step.id = uid();
         /* Tab identity is url + title, tagged here from the real sender. */
         step.url = (sender && sender.tab && sender.tab.url) || step.url || '';
         step.title = (sender && sender.tab && sender.tab.title) || step.title || hostOf(step.url);
         if (!step.repeat) step.repeat = null;
+        if (d.mode === 'redo') return applyRedo(step);
         var key = msg.coalesceKey ? msg.coalesceKey + '@' + step.url : null;
         /* One serialized job, so the "switched to tab" step can never land
          * after the action that provoked it. */
