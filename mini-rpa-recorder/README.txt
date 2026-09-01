@@ -241,6 +241,20 @@ first, and anything the page has marked hidden or inert behind it is not treated
 as clickable. That stops a pass clicking a background button that happens to
 share its wording with the one in the dialog.
 
+Whatever the dialog contains is always reachable, wherever the page happens to
+put it in the tree. That matters because sites build these very differently: as
+a panel beside the page, as a native <dialog>, dropped in at a different depth
+every time it opens, or - the awkward one - rendered inside the very container
+the page then marks aria-hidden. Only the dialog's surroundings are treated as
+out of reach, never the dialog itself.
+
+Where a button in a dialog has nothing stable to identify it - no id, no test
+attribute, no label - what gets recorded is a path counted through the tree, and
+that is the weakest thing this tool stores. Dialog markup is usually rebuilt
+each time it opens, so at playback the wording is tried first and the counted
+path is only the fallback. A dialog that grows an extra button between recording
+and playback will still have the right one clicked.
+
 A pass finishes before the next one starts. That matters most when a dialog is
 involved: the loop waits for it to close again before looking for the next
 element, because starting the next pass while the page is still covered means

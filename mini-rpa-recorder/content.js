@@ -106,12 +106,49 @@ if (window.__miniRpaLoaded) {
       return el.id === BADGE_ID || !!el.closest('#' + BADGE_ID);
     }
 
-    /* An open modal marks the page behind it aria-hidden or inert. Those
-     * elements are still in the DOM and still match a selector, but clicking
-     * one does nothing - which is exactly how a repeat loop ends up spinning
-     * against a page that has a dialog sitting on top of it. */
+    /* The topmost dialog on the page, if one is open. Declared before
+     * isBehindModal because that has to know what the dialog contains. */
+    function openDialog() {
+      var nodes;
+      try {
+        nodes = document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]');
+      } catch (e) { return null; }
+      for (var i = nodes.length - 1; i >= 0; i--) {
+        var n = nodes[i];
+        var rect = n.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return n;
+      }
+      return null;
+    }
+
+    /* A dialog that takes over the page: everything outside it is unreachable
+     * until it closes. A plain role="dialog" with no modal flag is treated as
+     * an ordinary panel, because plenty of them do not block anything. */
+    function modalDialog() {
+      var dlg = openDialog();
+      if (!dlg) return null;
+      if (dlg.hasAttribute('aria-modal') && dlg.getAttribute('aria-modal') !== 'false') return dlg;
+      if (dlg.tagName === 'DIALOG' && dlg.hasAttribute('open')) return dlg;
+      return null;
+    }
+
+    /* An open modal leaves the page behind it in the DOM and still matching
+     * selectors, though clicking any of it does nothing - which is how a loop
+     * ends up spinning against a covered page.
+     *
+     * The catch is where the dialog itself is rendered. Plenty of sites put it
+     * inside the very container they then mark aria-hidden, so "is it inside
+     * something hidden" on its own throws away the dialog's own buttons and the
+     * confirm step can never be found. Whatever the topmost dialog contains is
+     * reachable, wherever it happens to sit in the tree. */
     function isBehindModal(el) {
-      try { return !!el.closest('[aria-hidden="true"], [inert]'); } catch (e) { return false; }
+      try {
+        var dlg = openDialog();
+        if (dlg && dlg.contains(el)) return false;
+        if (el.closest('[aria-hidden="true"], [inert]')) return true;
+        /* No aria-hidden, but a modal is up: everything outside it is covered. */
+        return !!modalDialog();
+      } catch (e) { return false; }
     }
 
     function isUsable(el) {
@@ -377,20 +414,6 @@ if (window.__miniRpaLoaded) {
       return null;
     }
 
-    /* The topmost visible dialog, if the page has one open. */
-    function openDialog() {
-      var nodes;
-      try {
-        nodes = document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]');
-      } catch (e) { return null; }
-      for (var i = nodes.length - 1; i >= 0; i--) {
-        var n = nodes[i];
-        var rect = n.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) return n;
-      }
-      return null;
-    }
-
     function findWithin(root, step) {
       if (step.selector) {
         var hit = null;
@@ -419,6 +442,16 @@ if (window.__miniRpaLoaded) {
         var inDialog = findWithin(dialog, step);
         if (inDialog) return inDialog;
       }
+      /* A path counted through the tree is the weakest thing we record. Dialog
+       * markup in particular is rebuilt each time it opens and rarely lands at
+       * the same index twice, so where the element had recognisable wording,
+       * that is tried first and the path is only the fallback. */
+      var positional = /:nth-(of-type|child|last-child|last-of-type)\b/i.test(step.selector || '');
+      if (positional) {
+        var byText = findByText(step);
+        if (byText) return byText;
+      }
+
       if (step.selector) {
         var matches = null;
         try { matches = document.querySelectorAll(step.selector); } catch (e) { matches = null; }
@@ -430,7 +463,7 @@ if (window.__miniRpaLoaded) {
            * behind a dialog. Waiting for it is right; falling through to match
            * whatever else happens to share its wording is how a replay ends up
            * clicking a completely different button. */
-          return null;
+          if (!positional) return null;
         }
       }
       return findByText(step);
