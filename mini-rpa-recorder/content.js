@@ -101,6 +101,151 @@ if (window.__miniRpaLoaded) {
       return false;
     }
 
+    /* ------------------------------------------------ shadow-aware querying */
+
+    /* A shadow root is a self-contained mini-document a page can hang off any
+     * element, and plenty of sites build their pop-outs inside one. Nothing
+     * inside it answers document.querySelectorAll, and a click that happens in
+     * there is reported against the element holding it rather than the button
+     * that was pressed - so both halves of this tool have to know they exist,
+     * or the pop-out records as its container and replays as a click on
+     * nothing.
+     *
+     * Recorded selectors cross a boundary with " >>> ": the route to the
+     * element hosting the root, then the path inside it. */
+
+    var PIERCE = ' >>> ';
+
+    function rootOf(el) {
+      var root = el && el.getRootNode ? el.getRootNode() : null;
+      return root || document;
+    }
+
+    /* A root and every open shadow root nested below it. Capped so a page that
+     * builds thousands of them cannot stall a lookup. */
+    function collectRoots(root, out) {
+      if (out.length >= 400) return out;
+      out.push(root);
+      var nodes;
+      try { nodes = root.querySelectorAll('*'); } catch (e) { return out; }
+      for (var i = 0; i < nodes.length; i++) {
+        if (out.length >= 400) break;
+        if (nodes[i].shadowRoot) collectRoots(nodes[i].shadowRoot, out);
+      }
+      return out;
+    }
+
+    /* Split a selector at its boundary markers, ignoring any that happen to sit
+     * inside a quoted attribute value - a button labelled "Skip >>>" would
+     * otherwise be torn in half and silently match nothing. */
+    function pierceHops(selector) {
+      var sel = String(selector == null ? '' : selector);
+      var hops = [];
+      var buf = '';
+      var quoted = '';
+      for (var i = 0; i < sel.length; i++) {
+        var c = sel.charAt(i);
+        if (quoted) {
+          if (c === '\\') { buf += c + sel.charAt(i + 1); i++; continue; }
+          if (c === quoted) quoted = '';
+          buf += c;
+          continue;
+        }
+        if (c === '"' || c === "'") { quoted = c; buf += c; continue; }
+        if (c === '>' && sel.substr(i, 3) === '>>>') { hops.push(buf.trim()); buf = ''; i += 2; continue; }
+        buf += c;
+      }
+      hops.push(buf.trim());
+      return hops;
+    }
+
+    /* Everything matching a selector, shadow roots included. Throws on an
+     * invalid selector so the caller can say so in plain English. */
+    function deepQueryAll(selector, within) {
+      var sel = String(selector == null ? '' : selector).trim();
+      if (!sel) return [];
+      var roots = [within || document];
+      var hops = pierceHops(sel);
+      var i, r, k;
+      /* Walk the recorded route: each hop names a host, and we drop into the
+       * root it carries. */
+      for (i = 0; i < hops.length - 1; i++) {
+        var part = hops[i];
+        if (!part) return [];
+        var next = [];
+        for (r = 0; r < roots.length; r++) {
+          var hosts = roots[r].querySelectorAll(part);
+          for (k = 0; k < hosts.length; k++) {
+            if (hosts[k].shadowRoot) next.push(hosts[k].shadowRoot);
+          }
+        }
+        roots = next;
+        if (!roots.length) return [];
+      }
+      var last = hops[hops.length - 1] || '*';
+      var scan = [];
+      for (r = 0; r < roots.length; r++) collectRoots(roots[r], scan);
+      /* Pages with no shadow roots at all are the common case and should cost
+       * exactly one ordinary query. */
+      if (scan.length === 1) return Array.prototype.slice.call(scan[0].querySelectorAll(last));
+      var out = [];
+      for (r = 0; r < scan.length; r++) {
+        var hit = scan[r].querySelectorAll(last);
+        for (k = 0; k < hit.length; k++) {
+          if (out.indexOf(hit[k]) === -1) out.push(hit[k]);
+        }
+      }
+      return out;
+    }
+
+    /* The part of a recorded selector that describes the element itself, with
+     * the route to its root dropped - used when the search is already scoped
+     * to a container such as an open dialog. */
+    function lastHop(selector) {
+      var hops = pierceHops(selector);
+      return hops[hops.length - 1];
+    }
+
+    /* contains() and closest() both stop dead at a shadow boundary, so these
+     * step out through the hosting elements to finish the job. */
+    function containsDeep(container, el) {
+      if (!container || !el) return false;
+      var node = el;
+      while (node) {
+        if (node === container) return true;
+        if (node.nodeType === 1 && container.contains && container.contains(node)) return true;
+        var root = node.getRootNode ? node.getRootNode() : null;
+        node = root && root.host ? root.host : null;
+      }
+      return false;
+    }
+
+    function closestDeep(el, selector) {
+      var node = el;
+      while (node) {
+        var hit = null;
+        try { hit = node.closest ? node.closest(selector) : null; } catch (e) { hit = null; }
+        if (hit) return hit;
+        var root = node.getRootNode ? node.getRootNode() : null;
+        node = root && root.host ? root.host : null;
+      }
+      return null;
+    }
+
+    /* The element the pointer was actually over. Inside a shadow root an
+     * event's own target is reported as the element hosting that root, so
+     * taking e.target at face value records the container. */
+    function eventTarget(e) {
+      var path = null;
+      try { path = e.composedPath ? e.composedPath() : null; } catch (err) { path = null; }
+      if (path) {
+        for (var i = 0; i < path.length; i++) {
+          if (path[i] && path[i].nodeType === 1) return path[i];
+        }
+      }
+      return e.target;
+    }
+
     function isOurBadge(el) {
       if (!el || !el.closest) return false;
       return el.id === BADGE_ID || !!el.closest('#' + BADGE_ID);
@@ -111,7 +256,7 @@ if (window.__miniRpaLoaded) {
     function openDialog() {
       var nodes;
       try {
-        nodes = document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]');
+        nodes = deepQueryAll('[role="dialog"], [aria-modal="true"], dialog[open]');
       } catch (e) { return null; }
       for (var i = nodes.length - 1; i >= 0; i--) {
         var n = nodes[i];
@@ -144,8 +289,8 @@ if (window.__miniRpaLoaded) {
     function isBehindModal(el) {
       try {
         var dlg = openDialog();
-        if (dlg && dlg.contains(el)) return false;
-        if (el.closest('[aria-hidden="true"], [inert]')) return true;
+        if (dlg && containsDeep(dlg, el)) return false;
+        if (closestDeep(el, '[aria-hidden="true"], [inert]')) return true;
         /* No aria-hidden, but a modal is up: everything outside it is covered. */
         return !!modalDialog();
       } catch (e) { return false; }
@@ -167,16 +312,17 @@ if (window.__miniRpaLoaded) {
 
     /* ------------------------------------------------- selector for one step */
 
-    function uniqueSelector(sel) {
-      try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; }
+    function uniqueSelector(sel, root) {
+      try { return (root || document).querySelectorAll(sel).length === 1; } catch (e) { return false; }
     }
 
     function cssPath(el) {
       var parts = [];
       var node = el;
+      var root = rootOf(el);
       while (node && node.nodeType === 1 && parts.length < 10) {
         var id = attr(node, 'id');
-        if (id && !looksGenerated(id) && uniqueSelector('#' + cssEscape(id))) {
+        if (id && !looksGenerated(id) && uniqueSelector('#' + cssEscape(id), root)) {
           parts.unshift('#' + cssEscape(id));
           break;
         }
@@ -193,32 +339,42 @@ if (window.__miniRpaLoaded) {
         parts.unshift(part);
         node = parent;
       }
-      return parts.join(' > ');
+      var path = parts.join(' > ');
+      /* The walk stops at the top of the shadow root the element lives in;
+       * the route to the element hosting that root goes in front of it. */
+      var host = root && root.host;
+      return host ? buildSelector(host) + PIERCE + path : path;
     }
 
     /* Preference order: id, data-testid, name, aria-label, then a CSS path. */
     function buildSelector(el) {
       if (!el || el.nodeType !== 1) return '';
       var tag = el.tagName.toLowerCase();
+      /* Uniqueness is judged inside the root the element actually lives in: an
+       * id only has to be one of a kind within its own shadow root, and the
+       * route to that root is what carries the lookup back to it. */
+      var root = rootOf(el);
+      var host = root && root.host;
+      var lead = host ? buildSelector(host) + PIERCE : '';
 
       var id = attr(el, 'id');
-      if (id && !looksGenerated(id) && uniqueSelector('#' + cssEscape(id))) {
-        return '#' + cssEscape(id);
+      if (id && !looksGenerated(id) && uniqueSelector('#' + cssEscape(id), root)) {
+        return lead + '#' + cssEscape(id);
       }
       var testId = attr(el, 'data-testid');
       if (testId && !looksGenerated(testId)) {
         var s1 = tag + '[data-testid="' + quote(testId) + '"]';
-        if (uniqueSelector(s1)) return s1;
+        if (uniqueSelector(s1, root)) return lead + s1;
       }
       var name = attr(el, 'name');
       if (name && !looksGenerated(name)) {
         var s2 = tag + '[name="' + quote(name) + '"]';
-        if (uniqueSelector(s2)) return s2;
+        if (uniqueSelector(s2, root)) return lead + s2;
       }
       var aria = attr(el, 'aria-label');
       if (aria) {
         var s3 = tag + '[aria-label="' + quote(aria) + '"]';
-        if (uniqueSelector(s3)) return s3;
+        if (uniqueSelector(s3, root)) return lead + s3;
       }
       return cssPath(el);
     }
@@ -239,7 +395,13 @@ if (window.__miniRpaLoaded) {
             walker.hasAttribute('onclick')) {
           return walker;
         }
-        walker = walker.parentElement;
+        var up = walker.parentElement;
+        if (!up) {
+          /* Top of a shadow root - the control may be the element hosting it. */
+          var owner = walker.getRootNode ? walker.getRootNode() : null;
+          up = owner && owner.host ? owner.host : null;
+        }
+        walker = up;
         hops++;
       }
       return el;
@@ -299,14 +461,14 @@ if (window.__miniRpaLoaded) {
 
     function onClickCapture(e) {
       if (!recording || !e.isTrusted) return;
-      var el = interactiveTarget(e.target);
+      var el = interactiveTarget(eventTarget(e));
       if (!el || isOurBadge(el)) return;
       record('click', el, {});
     }
 
     function onInputCapture(e) {
       if (!recording || !e.isTrusted) return;
-      var el = e.target;
+      var el = eventTarget(e);
       if (!isFormField(el) || isOurBadge(el)) return;
       var type = (el.type || '').toLowerCase();
       if (type === 'checkbox' || type === 'radio') return; /* handled by change */
@@ -320,7 +482,7 @@ if (window.__miniRpaLoaded) {
 
     function onChangeCapture(e) {
       if (!recording || !e.isTrusted) return;
-      var el = e.target;
+      var el = eventTarget(e);
       if (!isFormField(el) || isOurBadge(el)) return;
       var tag = el.tagName.toLowerCase();
       var type = (el.type || '').toLowerCase();
@@ -334,7 +496,8 @@ if (window.__miniRpaLoaded) {
     function onKeydownCapture(e) {
       if (!recording || !e.isTrusted) return;
       if (e.key !== 'Enter' && e.key !== 'Tab' && e.key !== 'Escape') return;
-      var el = e.target && e.target.nodeType === 1 ? e.target : document.body;
+      var focused = eventTarget(e);
+      var el = focused && focused.nodeType === 1 ? focused : document.body;
       if (isOurBadge(el)) return;
       record('key', el, { value: e.key });
     }
@@ -404,7 +567,7 @@ if (window.__miniRpaLoaded) {
       var want = squash(step.fallbackText || step.ariaLabel || '').toLowerCase();
       if (!want) return null;
       var nodes;
-      try { nodes = document.querySelectorAll(tag); } catch (e) { return null; }
+      try { nodes = deepQueryAll(tag); } catch (e) { return null; }
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         if (!isUsable(n)) continue;
@@ -416,15 +579,20 @@ if (window.__miniRpaLoaded) {
 
     function findWithin(root, step) {
       if (step.selector) {
-        var hit = null;
-        try { hit = root.querySelector(step.selector); } catch (e) { hit = null; }
-        if (hit && isUsable(hit)) return hit;
+        /* The search is already scoped to this container, so only the part of
+         * the selector describing the element itself is wanted - the route to
+         * whatever root it was recorded in leads somewhere above here. */
+        var hits = [];
+        try { hits = deepQueryAll(lastHop(step.selector), root); } catch (e) { hits = []; }
+        for (var h = 0; h < hits.length; h++) {
+          if (isUsable(hits[h])) return hits[h];
+        }
       }
       var want = squash(step.fallbackText || step.ariaLabel || '').toLowerCase();
       if (!want) return null;
       var tag = (step.tagName || '*').toLowerCase();
       var nodes;
-      try { nodes = root.querySelectorAll(tag); } catch (e) { return null; }
+      try { nodes = deepQueryAll(tag, root); } catch (e) { return null; }
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         if (!isUsable(n)) continue;
@@ -454,7 +622,7 @@ if (window.__miniRpaLoaded) {
 
       if (step.selector) {
         var matches = null;
-        try { matches = document.querySelectorAll(step.selector); } catch (e) { matches = null; }
+        try { matches = deepQueryAll(step.selector); } catch (e) { matches = null; }
         if (matches && matches.length) {
           for (var i = 0; i < matches.length; i++) {
             if (isUsable(matches[i])) return matches[i];
@@ -657,7 +825,7 @@ if (window.__miniRpaLoaded) {
       if (/:nth-(of-type|child|last-child|last-of-type)\b/i.test(parsed.css)) throw positionalError();
       var nodes;
       try {
-        nodes = Array.prototype.slice.call(document.querySelectorAll(parsed.css));
+        nodes = deepQueryAll(parsed.css);
       } catch (e) {
         throw new Error('"' + parsed.css + '" is not a valid CSS selector.');
       }
