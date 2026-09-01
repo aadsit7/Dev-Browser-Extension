@@ -32,7 +32,18 @@
     setHint: document.getElementById('setHint'),
     count: document.getElementById('stepCount'),
     selectBar: document.getElementById('selectBar'),
-    redoBar: document.getElementById('redoBar')
+    redoBar: document.getElementById('redoBar'),
+    libraryBox: document.getElementById('libraryBox'),
+    libraryCount: document.getElementById('libraryCount'),
+    libraryLoaded: document.getElementById('libraryLoaded'),
+    saveName: document.getElementById('saveName'),
+    btnSave: document.getElementById('btnSave'),
+    libraryEmpty: document.getElementById('libraryEmpty'),
+    libraryList: document.getElementById('libraryList'),
+    btnImport: document.getElementById('btnImport'),
+    btnExportCurrent: document.getElementById('btnExportCurrent'),
+    importFile: document.getElementById('importFile'),
+    storageUse: document.getElementById('storageUse')
   };
 
   var steps = [];
@@ -61,7 +72,7 @@
     el.notice.className = 'notice notice-info';
     el.notice.textContent = '';
     var msg = document.createElement('span');
-    msg.textContent = 'Deleted “' + trunc(undoSnapshot.label, 44) + '”. ';
+    msg.textContent = undoSnapshot.text + ' ';
     el.notice.appendChild(msg);
     var undo = document.createElement('button');
     undo.type = 'button';
@@ -443,19 +454,43 @@
     el.skipped.appendChild(ul);
   }
 
+  /* The quota is shared by the current steps and every saved recording, so
+   * the warning is about the total once Chrome can say what it is; the
+   * estimate from the steps in hand stands in until then. */
   function renderSize() {
     var bytes = 0;
     try { bytes = new Blob([JSON.stringify(steps)]).size; } catch (e) { bytes = 0; }
-    if (bytes > SIZE_WARN_BYTES) {
-      el.sizeWarn.hidden = false;
-      el.sizeWarn.className = 'notice notice-warn';
-      el.sizeWarn.textContent =
-        'This recording is about ' + (bytes / (1024 * 1024)).toFixed(1) + ' MB, mostly screenshots. ' +
+    showSizeWarning(bytes, null);
+    var area = chrome.storage && chrome.storage.local;
+    if (!area || typeof area.getBytesInUse !== 'function') return;
+    area.getBytesInUse(null).then(function (used) {
+      showSizeWarning(bytes, used);
+      renderStorageUse(used);
+    }).catch(function () { /* the estimate above will do */ });
+  }
+
+  function showSizeWarning(recordingBytes, totalBytes) {
+    var total = totalBytes == null ? recordingBytes : Math.max(totalBytes, recordingBytes);
+    if (total <= SIZE_WARN_BYTES) { el.sizeWarn.hidden = true; return; }
+    el.sizeWarn.hidden = false;
+    el.sizeWarn.className = 'notice notice-warn';
+    var savedShare = totalBytes != null && totalBytes - recordingBytes > 512 * 1024;
+    el.sizeWarn.textContent = savedShare
+      ? 'The saved recordings and the current steps take about ' + megabytes(total) + ' together, ' +
+        'mostly screenshots. Chrome limits extension storage to roughly 10 MB, so delete a saved ' +
+        'recording or some screenshot steps before saving more, or the next save may fail.'
+      : 'This recording is about ' + megabytes(recordingBytes) + ', mostly screenshots. ' +
         'Chrome limits extension storage to roughly 10 MB, so delete some screenshot steps ' +
         'before adding more or the recording may fail to save.';
-    } else {
-      el.sizeWarn.hidden = true;
-    }
+  }
+
+  function renderStorageUse(used) {
+    var quota = (chrome.storage.local && chrome.storage.local.QUOTA_BYTES) || 10 * 1024 * 1024;
+    el.storageUse.textContent = megabytes(used) + ' of ' + Math.round(quota / (1024 * 1024)) + ' MB used';
+  }
+
+  function megabytes(bytes) {
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
   /* ------------------------------------------------------------ step list */
@@ -1246,7 +1281,11 @@
        * whole list as it was. Snapshotting everything rather than the one step
        * also restores any action set that shrank around it. */
       var doomed = stepById(id);
-      undoSnapshot = { steps: steps.slice(), label: doomed ? describe(doomed) : 'that step' };
+      undoSnapshot = {
+        steps: steps.slice(),
+        loadedFrom: loadedFrom,
+        text: 'Deleted “' + trunc(doomed ? describe(doomed) : 'that step', 44) + '”.'
+      };
       actAndReport({ cmd: 'deleteStep', id: id }).then(function (res) {
         if (res && res.ok !== false) showUndo();
       });
@@ -1322,9 +1361,14 @@
   el.notice.addEventListener('click', function (e) {
     if (!e.target || !e.target.dataset || e.target.dataset.role !== 'undo') return;
     if (!undoSnapshot) return;
-    var restore = undoSnapshot.steps;
+    var restore = undoSnapshot;
     undoSnapshot = null;
-    actAndReport({ cmd: 'restoreSteps', steps: restore });
+    actAndReport({
+      cmd: 'restoreSteps',
+      steps: restore.steps,
+      loadedFrom: restore.loadedFrom || null,
+      note: restore.undoNote || 'Step restored.'
+    });
   });
 
   el.selectBar.addEventListener('click', function (e) {
@@ -1470,6 +1514,377 @@
     actAndReport({ cmd: 'clear' });
   });
 
+  /* ------------------------------------------------------ saved recordings */
+
+  /* The working recording is one slot. Saving keeps a named copy of it, so a
+   * second job can be recorded without losing the first, and Load brings a
+   * copy back into the slot. The list is drawn from the index the background
+   * keeps; a saved recording's steps are only fetched when it is loaded or
+   * exported, so a library full of screenshots costs nothing to look at. */
+
+  var library = [];          /* { id, name, savedAt, stepCount, loops, bytes } */
+  var loadedFrom = null;     /* which saved recording the working steps came from */
+  var shownLoadedId = null;  /* the name box follows this, and nothing else */
+  var shownLoadedName = '';
+  var renamingId = null;     /* the entry whose name is an input box right now */
+  var armedDelete = null;    /* { id, timer } - first press asks, second deletes */
+  var armedReplace = null;   /* { name, timer } - same, for saving over another entry */
+  var libraryOpenDecided = false;
+  var libraryNudged = false;
+  var ARM_MS = 4000;
+
+  function sameName(a, b) {
+    return squash(a).toLowerCase() === squash(b).toLowerCase();
+  }
+
+  function entryById(id) {
+    for (var i = 0; i < library.length; i++) if (library[i].id === id) return library[i];
+    return null;
+  }
+
+  function entryByName(name) {
+    for (var i = 0; i < library.length; i++) if (sameName(library[i].name, name)) return library[i];
+    return null;
+  }
+
+  function whenText(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    var opts = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    try { return d.toLocaleDateString(undefined, opts); } catch (e) { return d.toDateString(); }
+  }
+
+  function disarmLibrary() {
+    if (armedDelete) { clearTimeout(armedDelete.timer); armedDelete = null; }
+    if (armedReplace) { clearTimeout(armedReplace.timer); armedReplace = null; }
+  }
+
+  /* Open where there is something to see or something to save; shut when the
+   * panel is a blank slate, so a first-time user is not handed a second
+   * section to read before they have pressed Record. Decided once from the
+   * first state that arrives, then left to the user. */
+  function decideLibraryOpen() {
+    if (libraryOpenDecided) return;
+    libraryOpenDecided = true;
+    el.libraryBox.open = library.length > 0 || steps.length > 0;
+  }
+
+  function renderLibrary() {
+    decideLibraryOpen();
+    var idle = mode === 'idle';
+    if (!idle) disarmLibrary();
+    el.libraryCount.textContent = String(library.length);
+
+    /* The name box shows the saved recording the steps came from - following
+     * it through a rename, so a Save afterwards updates that entry rather than
+     * making a second one under the old name - and is otherwise left exactly
+     * as the user last typed it. */
+    var loadedId = loadedFrom ? loadedFrom.id : null;
+    var loadedName = loadedFrom ? loadedFrom.name : '';
+    if (loadedFrom && (loadedId !== shownLoadedId ||
+        (loadedName !== shownLoadedName && sameName(el.saveName.value, shownLoadedName)))) {
+      el.saveName.value = loadedName;
+    }
+    shownLoadedId = loadedId;
+    shownLoadedName = loadedName;
+
+    var name = squash(el.saveName.value);
+    var clash = name ? entryByName(name) : null;
+    var updating = !!(clash && loadedFrom && clash.id === loadedFrom.id);
+    if (clash && !updating && armedReplace && armedReplace.name === name) {
+      el.btnSave.textContent = 'Press again to replace';
+    } else {
+      el.btnSave.textContent = updating ? 'Save changes' : 'Save';
+    }
+    el.btnSave.disabled = !idle || !steps.length;
+    el.saveName.disabled = !idle;
+    el.btnImport.disabled = !idle;
+    el.btnExportCurrent.disabled = !steps.length;
+
+    if (loadedFrom) {
+      el.libraryLoaded.hidden = false;
+      el.libraryLoaded.textContent = 'working on “' + trunc(loadedFrom.name, 22) + '”';
+      el.libraryLoaded.title = 'The steps above were loaded from “' + loadedFrom.name + '”';
+    } else {
+      el.libraryLoaded.hidden = true;
+      el.libraryLoaded.textContent = '';
+    }
+
+    el.libraryEmpty.hidden = library.length > 0;
+    el.libraryList.textContent = '';
+    var sorted = library.slice().sort(function (a, b) {
+      return squash(a.name).toLowerCase().localeCompare(squash(b.name).toLowerCase());
+    });
+    sorted.forEach(function (entry) {
+      el.libraryList.appendChild(buildLibraryRow(entry, idle));
+    });
+    var box = el.libraryList.querySelector('.rec-rename');
+    if (box) { box.focus(); box.select(); }
+  }
+
+  function buildLibraryRow(entry, idle) {
+    var li = document.createElement('li');
+    var current = !!(loadedFrom && loadedFrom.id === entry.id);
+    li.className = 'rec' + (current ? ' rec-current' : '');
+    li.dataset.id = entry.id;
+
+    var main = document.createElement('div');
+    main.className = 'rec-main';
+    if (renamingId === entry.id) {
+      var box = document.createElement('input');
+      box.type = 'text';
+      box.className = 'rec-rename';
+      box.value = entry.name;
+      box.maxLength = 80;
+      box.spellcheck = false;
+      box.dataset.role = 'renamebox';
+      box.dataset.id = entry.id;
+      box.setAttribute('aria-label', 'New name for ' + entry.name);
+      main.appendChild(box);
+    } else {
+      var name = document.createElement('span');
+      name.className = 'rec-name';
+      name.textContent = entry.name;
+      name.title = entry.name;
+      main.appendChild(name);
+    }
+    var meta = document.createElement('span');
+    meta.className = 'rec-meta';
+    var bits = [entry.stepCount + ' step' + (entry.stepCount === 1 ? '' : 's')];
+    if (entry.loops) bits.push('loops');
+    if (entry.bytes > 200 * 1024) bits.push(megabytes(entry.bytes));
+    if (entry.savedAt) bits.push(whenText(entry.savedAt));
+    if (current) bits.push('loaded');
+    meta.textContent = bits.join(' · ');
+    main.appendChild(meta);
+    li.appendChild(main);
+
+    var actions = document.createElement('div');
+    actions.className = 'rec-actions';
+    function action(role, text, title, enabled, danger) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'link-btn' + (danger ? ' link-danger' : '');
+      b.dataset.role = role;
+      b.dataset.id = entry.id;
+      b.textContent = text;
+      b.title = title;
+      b.disabled = !enabled;
+      actions.appendChild(b);
+    }
+    action('load', 'Load', 'Put a copy of these steps in the list above, ready to play', idle, false);
+    action('rename', 'Rename', 'Call this saved recording something else', idle, false);
+    action('export', 'Export', 'Download this recording as a file you can keep or share', true, false);
+    action('libdelete', armedDelete && armedDelete.id === entry.id ? 'Really delete?' : 'Delete',
+           'Delete this saved recording', idle, true);
+    li.appendChild(actions);
+    return li;
+  }
+
+  /* Loading replaces the working steps, so what was there is kept and offered
+   * back with an Undo, the same way a deleted step is. */
+  function loadFromLibrary(entry) {
+    disarmLibrary();
+    var had = steps.length;
+    var snapshot = had ? {
+      steps: steps.slice(),
+      loadedFrom: loadedFrom,
+      text: 'Loaded “' + trunc(entry.name, 36) + '” in place of the ' + had +
+            ' step' + (had === 1 ? '' : 's') + ' you had.',
+      undoNote: 'Put your previous steps back.'
+    } : null;
+    actAndReport({ cmd: 'libraryLoad', id: entry.id }).then(function (res) {
+      if (!res || res.ok === false) return;
+      if (snapshot) {
+        undoSnapshot = snapshot;
+        showUndo();
+      } else {
+        showLocalNotice('Loaded “' + trunc(entry.name, 36) + '” — ' + res.count + ' step' +
+                        (res.count === 1 ? '' : 's') + '. Press Play to run it.', 'info');
+      }
+    });
+  }
+
+  /* ---- files: a recording as JSON, so it can be backed up or handed on ---- */
+
+  function exportFileName(name) {
+    var slug = squash(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    return 'mini-rpa-' + (slug || 'recording') + '.json';
+  }
+
+  function exportText(name, savedAt, list) {
+    return JSON.stringify({
+      format: 'mini-rpa-recording',
+      version: 1,
+      name: name,
+      savedAt: savedAt || null,
+      exportedAt: new Date().toISOString(),
+      steps: list
+    }, null, 2);
+  }
+
+  function download(filename, text) {
+    var url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+  }
+
+  function importFile(file) {
+    var fallback = String(file.name || '').replace(/\.json$/i, '');
+    return file.text().then(function (text) {
+      var parsed;
+      try { parsed = JSON.parse(text); } catch (e) {
+        showLocalNotice('That file is not valid JSON, so it cannot be a recording.', 'error');
+        return null;
+      }
+      var list = Array.isArray(parsed) ? parsed
+        : (parsed && Array.isArray(parsed.steps)) ? parsed.steps : null;
+      if (!list) {
+        showLocalNotice('That file does not look like a Mini RPA recording — it has no list of steps.', 'error');
+        return null;
+      }
+      var name = (parsed && !Array.isArray(parsed) && parsed.name) ? String(parsed.name) : fallback;
+      return actAndReport({ cmd: 'libraryImport', name: name, steps: list });
+    }).catch(function (e) {
+      showLocalNotice('Could not read that file: ' + ((e && e.message) || e), 'error');
+    });
+  }
+
+  /* ---- controls ---- */
+
+  el.btnSave.addEventListener('click', function () {
+    var name = squash(el.saveName.value);
+    if (!name) {
+      el.saveName.focus();
+      showLocalNotice('Give the recording a name first.', 'warn');
+      return;
+    }
+    var clash = entryByName(name);
+    var updating = !!(clash && loadedFrom && clash.id === loadedFrom.id);
+    /* Saving over a different saved recording loses it, so that takes a
+     * second press - the same guard as "Delete all steps". */
+    if (clash && !updating && !(armedReplace && armedReplace.name === name)) {
+      disarmLibrary();
+      armedReplace = {
+        name: name,
+        timer: setTimeout(function () { armedReplace = null; renderLibrary(); }, ARM_MS)
+      };
+      renderLibrary();
+      return;
+    }
+    disarmLibrary();
+    actAndReport({ cmd: 'librarySave', name: name, id: clash ? clash.id : null }).then(function () {
+      renderLibrary();
+    });
+  });
+
+  el.saveName.addEventListener('input', function () {
+    if (armedReplace) disarmLibrary();
+    renderLibrary();
+  });
+
+  el.saveName.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (!el.btnSave.disabled) el.btnSave.click();
+  });
+
+  el.btnExportCurrent.addEventListener('click', function () {
+    if (!steps.length) return;
+    var name = squash(el.saveName.value) || (loadedFrom && loadedFrom.name) || 'recording';
+    download(exportFileName(name), exportText(name, null, steps));
+  });
+
+  el.btnImport.addEventListener('click', function () {
+    el.importFile.value = '';
+    el.importFile.click();
+  });
+
+  el.importFile.addEventListener('change', function () {
+    var file = el.importFile.files && el.importFile.files[0];
+    if (!file) return;
+    importFile(file);
+  });
+
+  el.libraryList.addEventListener('click', function (e) {
+    var target = e.target;
+    if (!target || !target.dataset || !target.dataset.role) return;
+    var role = target.dataset.role;
+    var entry = entryById(target.dataset.id);
+    if (!entry) return;
+
+    if (role === 'load') { loadFromLibrary(entry); return; }
+
+    if (role === 'rename') {
+      disarmLibrary();
+      renamingId = entry.id;
+      renderLibrary();
+      return;
+    }
+
+    if (role === 'export') {
+      ask({ cmd: 'libraryExport', id: entry.id }).then(function (res) {
+        if (!res || res.ok === false) {
+          showLocalNotice((res && res.error) || 'Could not export that recording.', 'error');
+          return;
+        }
+        download(exportFileName(res.name), exportText(res.name, res.savedAt, res.steps));
+      });
+      return;
+    }
+
+    if (role === 'libdelete') {
+      if (!armedDelete || armedDelete.id !== entry.id) {
+        disarmLibrary();
+        armedDelete = {
+          id: entry.id,
+          timer: setTimeout(function () { armedDelete = null; renderLibrary(); }, ARM_MS)
+        };
+        renderLibrary();
+        return;
+      }
+      disarmLibrary();
+      actAndReport({ cmd: 'libraryDelete', id: entry.id });
+    }
+  });
+
+  function commitRename(box) {
+    var id = box.dataset.id;
+    if (renamingId !== id) return;          /* already committed, or cancelled */
+    renamingId = null;
+    var entry = entryById(id);
+    var name = squash(box.value);
+    if (!entry || !name || name === entry.name) { renderLibrary(); return; }
+    actAndReport({ cmd: 'libraryRename', id: id, name: name }).then(function (res) {
+      if (!res || res.ok === false) renderLibrary();
+    });
+  }
+
+  el.libraryList.addEventListener('keydown', function (e) {
+    var target = e.target;
+    if (!target || !target.dataset || target.dataset.role !== 'renamebox') return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitRename(target);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      renamingId = null;
+      renderLibrary();
+    }
+  });
+
+  el.libraryList.addEventListener('focusout', function (e) {
+    var target = e.target;
+    if (!target || !target.dataset || target.dataset.role !== 'renamebox') return;
+    commitRename(target);
+  });
+
   /* ------------------------------------------------------------ state sync */
 
   /* Recording ending is the one moment there is something to look at and the
@@ -1480,7 +1895,16 @@
   function noteMode() {
     var was = lastMode;
     lastMode = mode;
-    if (was === 'recording' && mode === 'idle') offerRepeat();
+    if (was === 'recording' && mode === 'idle') {
+      offerRepeat();
+      /* Now there is something worth keeping, so the box it is kept from
+       * should be in view - once; a user who shuts it again is not argued
+       * with. */
+      if (!libraryNudged && steps.length && !el.libraryBox.open) {
+        libraryNudged = true;
+        el.libraryBox.open = true;
+      }
+    }
   }
 
   function applyState(local, playState) {
@@ -1488,6 +1912,8 @@
     redoingId = (local && local.redoStepId) || null;
     nextPageId = (local && local.nextPageForId) || null;
     steps = Array.isArray(local && local.steps) ? local.steps : [];
+    library = Array.isArray(local && local.library) ? local.library : [];
+    loadedFrom = (local && local.loadedFrom) || null;
     play = playState || null;
     renderStatus();
     renderButtons();
@@ -1495,6 +1921,7 @@
     renderSkipped(local && local.skipped);
     renderSize();
     renderList(false);
+    renderLibrary();
     noteMode();
   }
 
@@ -1506,7 +1933,7 @@
       }
       /* The service worker may still be waking up - read storage directly. */
       return Promise.all([
-        chrome.storage.local.get(['mode', 'steps', 'notice', 'skipped']),
+        chrome.storage.local.get(['mode', 'steps', 'notice', 'skipped', 'library', 'loadedFrom']),
         chrome.storage.session.get('play')
       ]).then(function (r) {
         applyState(r[0], r[1] && r[1].play);
@@ -1522,6 +1949,8 @@
       if (changes.redoStepId) redoingId = changes.redoStepId.newValue || null;
       if (changes.nextPageForId) nextPageId = changes.nextPageForId.newValue || null;
       if (changes.steps) steps = Array.isArray(changes.steps.newValue) ? changes.steps.newValue : [];
+      if (changes.library) library = Array.isArray(changes.library.newValue) ? changes.library.newValue : [];
+      if (changes.loadedFrom) loadedFrom = changes.loadedFrom.newValue || null;
       if (changes.notice) renderNotice(changes.notice.newValue);
       if (changes.skipped) renderSkipped(changes.skipped.newValue);
       if (changes.mode || changes.steps || changes.redoStepId || changes.nextPageForId) {
@@ -1531,6 +1960,10 @@
         renderSkipped();
         renderList(false);
       }
+      /* Saving or deleting a recording moves the storage total as much as
+       * the steps do, so the size read-out follows the library too. */
+      if (changes.library && !changes.steps) renderSize();
+      if (changes.mode || changes.steps || changes.library || changes.loadedFrom) renderLibrary();
       if (changes.mode) noteMode();
     } else if (area === 'session') {
       if (changes.play) {

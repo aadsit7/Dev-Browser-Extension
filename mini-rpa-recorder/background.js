@@ -50,7 +50,8 @@ function errText(e) {
     return 'the page is not reachable (it may have navigated, closed, or blocked the extension)';
   }
   if (/QUOTA|quota/.test(text)) {
-    return 'the recording is too big to save - delete some screenshot steps or press Clear';
+    return 'the extension\'s storage is full (Chrome allows about 10 MB) - delete a saved recording ' +
+           'or some screenshot steps to make room';
   }
   return text;
 }
@@ -182,10 +183,11 @@ initPanelBehaviour();
 
 chrome.runtime.onInstalled.addListener(function () {
   initPanelBehaviour();
-  getLocal(['mode', 'steps']).then(function (d) {
+  getLocal(['mode', 'steps', 'library']).then(function (d) {
     var patch = {};
     if (d.mode !== 'recording' && d.mode !== 'playing') patch.mode = 'idle';
     if (!Array.isArray(d.steps)) patch.steps = [];
+    if (!Array.isArray(d.library)) patch.library = [];
     if (Object.keys(patch).length) chrome.storage.local.set(patch);
   });
 });
@@ -1204,6 +1206,291 @@ function takeScreenshot() {
   });
 }
 
+/* ----------------------------------------------------------------- library */
+
+/* Saved recordings. The working recording stays in `steps`, exactly as it
+ * always has; a saved one is a snapshot of it kept under a name, so a second
+ * job can be recorded without losing the first. The index under `library`
+ * holds only what the list needs to draw itself - name, size, when - and each
+ * body lives under its own `rec:<id>` key, so opening the panel never has to
+ * read every screenshot ever saved just to show the names. `loadedFrom` says
+ * which saved recording the working steps came from, if any. */
+
+var STEP_TYPES = { click: 1, input: 1, change: 1, key: 1, scroll: 1, switchTab: 1, screenshot: 1 };
+var LIBRARY_NAME_MAX = 80;
+var IMPORT_STEP_LIMIT = 500;
+
+function libraryKey(id) {
+  return 'rec:' + id;
+}
+
+function getLibrary() {
+  return getLocal('library').then(function (d) {
+    return Array.isArray(d.library) ? d.library : [];
+  });
+}
+
+function cleanName(name) {
+  return String(name == null ? '' : name).replace(/\s+/g, ' ').trim().slice(0, LIBRARY_NAME_MAX);
+}
+
+function sameName(a, b) {
+  return cleanName(a).toLowerCase() === cleanName(b).toLowerCase();
+}
+
+function libraryIndexOf(library, id) {
+  for (var i = 0; i < library.length; i++) if (library[i].id === id) return i;
+  return -1;
+}
+
+function roughBytes(value) {
+  try { return JSON.stringify(value).length; } catch (e) { return 0; }
+}
+
+function indexEntry(body) {
+  return {
+    id: body.id,
+    name: body.name,
+    savedAt: body.savedAt,
+    stepCount: body.steps.length,
+    loops: body.steps.some(function (s) { return !!(s && s.repeat && s.repeat.enabled); }),
+    bytes: roughBytes(body.steps)
+  };
+}
+
+function plural(n, word) {
+  return n + ' ' + word + (n === 1 ? '' : 's');
+}
+
+/* Save the working recording under a name. With an id, that entry is replaced
+ * whatever it was called; without one, a name already in use replaces that
+ * entry (the panel asks for a second press before sending such a save) and a
+ * new name makes a new entry. */
+function librarySave(name, id) {
+  var clean = cleanName(name);
+  if (!clean) return Promise.resolve({ ok: false, error: 'Give the recording a name first.' });
+  return serialize(function () {
+    return Promise.all([getLocal(['mode', 'steps']), getLibrary()]).then(function (r) {
+      if (r[0].mode !== 'idle') return { ok: false, error: 'Stop recording or playback before saving.' };
+      var steps = Array.isArray(r[0].steps) ? r[0].steps : [];
+      if (!steps.length) return { ok: false, error: 'There is nothing to save yet - record some steps first.' };
+      var library = r[1];
+      var at = id ? libraryIndexOf(library, id) : -1;
+      if (at < 0) {
+        for (var j = 0; j < library.length; j++) if (sameName(library[j].name, clean)) { at = j; break; }
+      }
+      var entryId = at >= 0 ? library[at].id : uid();
+      var body = { id: entryId, name: clean, savedAt: Date.now(), steps: steps };
+      var next = library.slice();
+      if (at >= 0) next[at] = indexEntry(body); else next.push(indexEntry(body));
+      var patch = { library: next, loadedFrom: { id: entryId, name: clean } };
+      patch[libraryKey(entryId)] = body;
+      return chrome.storage.local.set(patch).then(function () {
+        return notice((at >= 0 ? 'Updated' : 'Saved') + ' "' + clean + '" (' + plural(steps.length, 'step') + ').', 'ok');
+      }).then(function () {
+        return { ok: true, id: entryId, replaced: at >= 0 };
+      }).catch(function (e) {
+        return { ok: false, error: 'Could not save "' + clean + '": ' + errText(e) + '.' };
+      });
+    });
+  });
+}
+
+/* Put a saved recording into the working slot. The panel keeps what was there
+ * and offers an Undo, the same way it does for a deleted step. */
+function libraryLoad(id) {
+  return serialize(function () {
+    return getLocal(['mode', libraryKey(id)]).then(function (d) {
+      if (d.mode !== 'idle') return { ok: false, error: 'Stop recording or playback before loading a recording.' };
+      var body = d[libraryKey(id)];
+      if (!body || !Array.isArray(body.steps)) {
+        return { ok: false, error: 'That saved recording is missing - it may have been deleted.' };
+      }
+      return chrome.storage.local.set({
+        steps: body.steps,
+        skipped: [],
+        loadedFrom: { id: body.id, name: body.name }
+      }).then(function () {
+        return { ok: true, name: body.name, count: body.steps.length };
+      }).catch(function (e) {
+        return { ok: false, error: 'Could not load "' + body.name + '": ' + errText(e) + '.' };
+      });
+    });
+  });
+}
+
+function libraryDelete(id) {
+  return serialize(function () {
+    return Promise.all([getLibrary(), getLocal('loadedFrom')]).then(function (r) {
+      var library = r[0];
+      var at = libraryIndexOf(library, id);
+      if (at < 0) return { ok: true };
+      var gone = library[at];
+      var next = library.slice();
+      next.splice(at, 1);
+      var patch = { library: next };
+      /* The working steps stay as they are; they just no longer belong to a
+       * saved recording. */
+      if (r[1].loadedFrom && r[1].loadedFrom.id === id) patch.loadedFrom = null;
+      return chrome.storage.local.set(patch)
+        .then(function () { return chrome.storage.local.remove(libraryKey(id)); })
+        .then(function () { return notice('Deleted "' + gone.name + '" from the saved recordings.', 'info'); })
+        .then(function () { return { ok: true }; });
+    });
+  });
+}
+
+function libraryRename(id, name) {
+  var clean = cleanName(name);
+  if (!clean) return Promise.resolve({ ok: false, error: 'A saved recording needs a name.' });
+  return serialize(function () {
+    return Promise.all([getLibrary(), getLocal([libraryKey(id), 'loadedFrom'])]).then(function (r) {
+      var library = r[0];
+      var at = libraryIndexOf(library, id);
+      var body = r[1][libraryKey(id)];
+      if (at < 0 || !body) return { ok: false, error: 'That saved recording is missing - it may have been deleted.' };
+      for (var k = 0; k < library.length; k++) {
+        if (k !== at && sameName(library[k].name, clean)) {
+          return { ok: false, error: 'There is already a saved recording called "' + library[k].name + '".' };
+        }
+      }
+      var next = library.slice();
+      next[at] = Object.assign({}, next[at], { name: clean });
+      var patch = { library: next };
+      patch[libraryKey(id)] = Object.assign({}, body, { name: clean });
+      if (r[1].loadedFrom && r[1].loadedFrom.id === id) patch.loadedFrom = { id: id, name: clean };
+      return chrome.storage.local.set(patch).then(function () { return { ok: true, name: clean }; });
+    });
+  });
+}
+
+function libraryExport(id) {
+  return getLocal(libraryKey(id)).then(function (d) {
+    var body = d[libraryKey(id)];
+    if (!body || !Array.isArray(body.steps)) {
+      return { ok: false, error: 'That saved recording is missing - it may have been deleted.' };
+    }
+    return { ok: true, name: body.name, savedAt: body.savedAt, steps: body.steps };
+  });
+}
+
+/* ---- import: a file is not to be trusted the way the extension's own
+ *      storage is, so only the fields the player knows are kept, every one
+ *      of them coerced to the shape it expects. */
+
+function cleanText(value, max) {
+  var s = typeof value === 'string' ? value : (value == null ? '' : String(value));
+  return max && s.length > max ? s.slice(0, max) : s;
+}
+
+function cleanAttrs(a) {
+  a = a && typeof a === 'object' ? a : {};
+  return {
+    id: cleanText(a.id, 200),
+    testId: cleanText(a.testId, 200),
+    name: cleanText(a.name, 200),
+    type: cleanText(a.type, 40)
+  };
+}
+
+function cleanControl(c) {
+  if (!c || typeof c !== 'object') return null;
+  return {
+    type: 'click',
+    selector: cleanText(c.selector, 2000),
+    tagName: cleanText(c.tagName, 40).toLowerCase(),
+    ariaLabel: cleanText(c.ariaLabel, 500),
+    fallbackText: cleanText(c.fallbackText, 500),
+    value: '',
+    attrs: cleanAttrs(c.attrs)
+  };
+}
+
+function cleanRepeat(r) {
+  if (!r || typeof r !== 'object') return null;
+  var out = {
+    enabled: !!r.enabled,
+    pattern: cleanText(r.pattern, 2000),
+    maxRepeats: Math.round(clamp(r.maxRepeats == null ? DEFAULT_MAX_REPEATS : r.maxRepeats, 1, MAX_REPEATS_CEILING)),
+    delaySeconds: clamp(r.delaySeconds == null ? DEFAULT_DELAY_SECONDS : r.delaySeconds, DELAY_FLOOR_MS / 1000, 600),
+    onMissing: r.onMissing === 'skip' ? 'skip' : 'stop',
+    nextPage: cleanControl(r.nextPage)
+  };
+  if (r.groupSize > 0) out.groupSize = Math.round(clamp(r.groupSize, 1, 50));
+  return out;
+}
+
+function sanitizeSteps(raw) {
+  var list = Array.isArray(raw) ? raw : [];
+  var out = [];
+  for (var i = 0; i < list.length && out.length < IMPORT_STEP_LIMIT; i++) {
+    var s = list[i];
+    if (!s || typeof s !== 'object' || !STEP_TYPES[s.type]) continue;
+    var step = {
+      id: uid(),
+      type: s.type,
+      selector: cleanText(s.selector, 2000),
+      tagName: cleanText(s.tagName, 40).toLowerCase(),
+      ariaLabel: cleanText(s.ariaLabel, 500),
+      fallbackText: cleanText(s.fallbackText, 500),
+      value: cleanText(s.value, 20000),
+      attrs: cleanAttrs(s.attrs),
+      url: cleanText(s.url, 4000),
+      title: cleanText(s.title, 500),
+      timestamp: isFinite(Number(s.timestamp)) ? Number(s.timestamp) : 0,
+      repeat: cleanRepeat(s.repeat),
+      coalesceKey: null
+    };
+    /* Passwords are never stored by this extension, and a file is no place
+     * to smuggle one in either. */
+    if (step.attrs.type === 'password') step.value = '';
+    if (s.set && typeof s.set === 'object' && s.set.size > 0) {
+      step.set = {
+        size: Math.round(clamp(s.set.size, 1, 50)),
+        name: cleanText(s.set.name, 100),
+        collapsed: !!s.set.collapsed
+      };
+    }
+    if (typeof s.note === 'string') step.note = cleanText(s.note, 200);
+    if (s.type === 'screenshot') {
+      if (typeof s.dataUrl !== 'string' || !/^data:image\/(png|jpe?g|webp);base64,/i.test(s.dataUrl)) continue;
+      step.dataUrl = s.dataUrl;
+    }
+    out.push(step);
+  }
+  return out;
+}
+
+/* A file becomes a new saved recording, never the working steps, so importing
+ * can never cost the user what they have in front of them. */
+function libraryImport(name, rawSteps) {
+  var steps = sanitizeSteps(rawSteps);
+  if (!steps.length) {
+    return Promise.resolve({ ok: false, error: 'That file does not contain any steps this extension understands.' });
+  }
+  return serialize(function () {
+    return getLibrary().then(function (library) {
+      var base = cleanName(name) || 'Imported recording';
+      var clean = base;
+      var n = 2;
+      while (library.some(function (e) { return sameName(e.name, clean); })) {
+        clean = cleanName(base.slice(0, LIBRARY_NAME_MAX - 6) + ' (' + n + ')');
+        n += 1;
+      }
+      var body = { id: uid(), name: clean, savedAt: Date.now(), steps: steps };
+      var patch = { library: library.concat([indexEntry(body)]) };
+      patch[libraryKey(body.id)] = body;
+      return chrome.storage.local.set(patch).then(function () {
+        return notice('Imported "' + clean + '" (' + plural(steps.length, 'step') + ') into the saved recordings.', 'ok');
+      }).then(function () {
+        return { ok: true, id: body.id, name: clean, count: steps.length };
+      }).catch(function (e) {
+        return { ok: false, error: 'Could not import "' + clean + '": ' + errText(e) + '.' };
+      });
+    });
+  });
+}
+
 /* --------------------------------------------------------------- messaging */
 
 function analyzePattern(pattern, text, prefix, signature) {
@@ -1287,7 +1574,7 @@ function handleMessage(msg, sender) {
   switch (msg && msg.cmd) {
     case 'getState':
       return Promise.all([
-        getLocal(['mode', 'steps', 'notice', 'skipped']),
+        getLocal(['mode', 'steps', 'notice', 'skipped', 'library', 'loadedFrom']),
         getPlay()
       ]).then(function (r) {
         return { ok: true, local: r[0], play: r[1] };
@@ -1324,7 +1611,9 @@ function handleMessage(msg, sender) {
       return stopPlayback().then(function () { return { ok: true }; });
 
     case 'clear':
-      return chrome.storage.local.set({ steps: [], skipped: [] })
+      /* Only the working steps go; a saved copy in the library is untouched,
+       * which is the whole point of having saved it. */
+      return chrome.storage.local.set({ steps: [], skipped: [], loadedFrom: null })
         .then(function () { return notice('Recording cleared.', 'info'); })
         .then(function () { return { ok: true }; });
 
@@ -1366,12 +1655,36 @@ function handleMessage(msg, sender) {
       return serialize(function () {
         var steps = Array.isArray(msg.steps) ? msg.steps : [];
         return saveSteps(steps)
-          .then(function () { return notice('Step restored.', 'info'); })
+          .then(function () {
+            /* Undoing a load puts back which saved recording the steps came
+             * from, as well as the steps themselves. */
+            if (msg.loadedFrom === undefined) return null;
+            return chrome.storage.local.set({ loadedFrom: msg.loadedFrom || null });
+          })
+          .then(function () { return notice(msg.note || 'Step restored.', 'info'); })
           .then(function () { return { ok: true }; });
       });
 
     case 'setGroup':
       return updateStep(msg.id, { set: msg.set || null });
+
+    case 'librarySave':
+      return librarySave(msg.name, msg.id);
+
+    case 'libraryLoad':
+      return libraryLoad(msg.id);
+
+    case 'libraryDelete':
+      return libraryDelete(msg.id);
+
+    case 'libraryRename':
+      return libraryRename(msg.id, msg.name);
+
+    case 'libraryExport':
+      return libraryExport(msg.id);
+
+    case 'libraryImport':
+      return libraryImport(msg.name, msg.steps);
 
     case 'countMatches':
       return countMatches(msg.pattern);

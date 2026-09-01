@@ -4,7 +4,10 @@ MINI RPA RECORDER
 A small record-and-replay tool for web pages. Press Start, do a handful of
 things across one or more tabs, press Stop, then press Play to have those same
 things done again. One click step can be switched to "Repeat" so it runs against
-every matching element on the page instead of just the one you clicked.
+every matching element on the page instead of just the one you clicked. A
+recording can be saved under a name and brought back later, so you can keep
+several jobs and pick the one you need, and exported to a file to back it up or
+hand it on.
 
 Manifest V3. No frameworks, no libraries, no network calls - it works offline.
 
@@ -89,9 +92,73 @@ between tabs.
       running. "Stop Playback" halts it - including part way through a repeat
       loop, not just between steps.
 
+  Keep it
+      Give the recording a name in "Saved recordings", under the step list, and
+      press Save. It stays on that list however many other jobs you record
+      after it, and Load brings it back. Section 3 has the details.
+
 
 -------------------------------------------------------------------------------
-3. REPEAT MODE
+3. SAVED RECORDINGS
+-------------------------------------------------------------------------------
+
+The step list holds one recording at a time. "Saved recordings", just under it,
+is where you keep the ones you want to come back to, so setting up a second job
+does not cost you the first. The section opens by itself once there is
+something to save or something saved; the triangle on its header folds it away.
+
+  Save
+      Type a name in the box and press Save. A copy of the steps above - loops,
+      groups, next-page controls and all - is kept under that name, and the
+      list shows it with its step count, whether it loops, and when it was
+      saved. The steps above are untouched, and the section header says which
+      saved recording they belong to.
+
+      Save with the same name again and it updates that entry (the button
+      reads "Save changes"). Save under a name that belongs to a DIFFERENT
+      saved recording and the button asks for a second press first, because
+      that replaces it. A new name makes a new entry and leaves the old one as
+      it was, which is how you keep a variation of a job alongside the
+      original.
+
+  Load
+      Puts a copy of that recording in the step list, ready to play. Whatever
+      was in the list is not thrown away: an Undo appears, and pressing it puts
+      the previous steps back exactly as they were. Loading never changes the
+      saved copy - edit the steps, loop them differently, delete one - and
+      nothing reaches the saved copy until you press Save.
+
+  Rename / Delete
+      Rename edits the name in place (Enter keeps it, Escape backs out). Delete
+      asks for a second press. Deleting a saved recording never touches the
+      steps in the list above, even if they were loaded from it.
+
+  Export / Import
+      Export downloads a saved recording as a JSON file; "Export the steps
+      above" does the same for the current list without saving it first.
+      Import reads such a file into the saved recordings as a new entry - it
+      never replaces the steps you have in front of you. That is how you back
+      a recording up, move it to another computer, or hand it to someone else.
+
+      A file is not trusted the way the extension's own storage is. On import
+      only the fields the player understands are kept, every value is checked
+      for shape and length, and a password value is dropped even if the file
+      carried one - the same rule as recording.
+
+  Room
+      The current steps and every saved recording share the roughly 10 MB
+      Chrome gives an extension, and the line at the foot of the section says
+      how much of it is in use. Screenshots are what fills it. If a save fails
+      for lack of room, delete a saved recording or some screenshot steps and
+      try again.
+
+  While recording or playing
+      Save, Load, Rename, Delete and Import wait until you are back to idle;
+      Export works at any time.
+
+
+-------------------------------------------------------------------------------
+4. REPEAT MODE
 -------------------------------------------------------------------------------
 
 IT SETS ITSELF UP
@@ -392,7 +459,7 @@ them.
 
 
 -------------------------------------------------------------------------------
-4. HOW TABS ARE MATCHED AT PLAYBACK
+5. HOW TABS ARE MATCHED AT PLAYBACK
 -------------------------------------------------------------------------------
 
 The recording never stores raw tab IDs - those change every time Chrome
@@ -417,22 +484,26 @@ so a loose match is never something that quietly happened without you knowing.
 
 
 -------------------------------------------------------------------------------
-5. WHERE THINGS ARE SAVED
+6. WHERE THINGS ARE SAVED
 -------------------------------------------------------------------------------
 
 The recording lives in chrome.storage.local, so it survives closing the panel
-and restarting the browser. Playback position and the repeat counter live in
-chrome.storage.session, so a page navigation or a sleeping background worker
-part way through a run can pick up where it left off rather than starting over.
+and restarting the browser. Saved recordings live there too: a small index of
+names and sizes under one key, and each recording's steps under a key of its
+own, so listing them never has to read every screenshot ever saved. Playback
+position and the repeat counter live in chrome.storage.session, so a page
+navigation or a sleeping background worker part way through a run can pick up
+where it left off rather than starting over.
 
 Screenshots are stored as data URLs and are by far the biggest thing in a
-recording. Chrome caps extension storage at roughly 10 MB, so the panel warns
-you once a recording passes about 8 MB - delete some screenshot steps at that
-point, or the next save will fail.
+recording. Chrome caps extension storage at roughly 10 MB across everything -
+the current steps and the saved recordings together - so the panel warns you
+once the total passes about 8 MB. Delete a saved recording or some screenshot
+steps at that point, or the next save will fail.
 
 
 -------------------------------------------------------------------------------
-6. LIMITATIONS - PLEASE READ
+7. LIMITATIONS - PLEASE READ
 -------------------------------------------------------------------------------
 
 This is a browser extension, so it lives inside web pages. That sets some hard
@@ -465,6 +536,14 @@ boundaries:
 
   - Elements are found by selector first, then by tag plus visible text. A page
     that changes its wording between recording and playback can break a step.
+
+  - A recorded Enter replays as the key itself and, where nothing on the page
+    took charge of it, what the browser would have done next: in a form with
+    no submit button and a single text box, that is submitting the form. A
+    form with a Search button needs no help - a real Enter in it clicks that
+    button, and that click was recorded as a step of its own, so the step does
+    the submitting. Tab and Escape are replayed as the keys alone; a page that
+    handles them itself responds, one that relies on the browser does not.
 
   - Pop-outs built inside a shadow root are handled. A shadow root is a
     self-contained pocket of page that some sites build their dialogs in, and
@@ -501,14 +580,16 @@ boundaries:
 
 
 -------------------------------------------------------------------------------
-7. FILES
+8. FILES
 -------------------------------------------------------------------------------
 
   manifest.json    Manifest V3 definition, permissions, side panel wiring
   sidepanel.html   Control panel markup (no inline script, as MV3 requires)
   sidepanel.css    All panel styling
-  sidepanel.js     Panel logic: buttons, step list, repeat editor, live counts
-  background.js    Service worker: injection, tab matching, playback sequencing
+  sidepanel.js     Panel logic: buttons, step list, repeat editor, live counts,
+                   saved recordings and their files
+  background.js    Service worker: injection, tab matching, playback sequencing,
+                   the saved-recordings store and import checking
   content.js       Injected into pages: records actions, replays them, runs the
                    repeat loop
   icons/           16, 48 and 128 pixel toolbar icons
