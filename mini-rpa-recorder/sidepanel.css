@@ -96,13 +96,15 @@ body {
   margin-bottom: 8px;
 }
 
+.btn[hidden] { display: none; }
+
 .btn {
   flex: 1;
   min-width: 0;
-  padding: 8px 6px;
+  padding: 11px 8px;
   font: inherit;
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink);
   background: var(--panel);
   border: 1px solid var(--line);
@@ -123,6 +125,41 @@ body {
 .btn-play { background: var(--play); border-color: var(--play); color: #fff; }
 .btn-play:hover:not(:disabled) { background: #15683a; }
 .btn-danger { color: var(--rec); }
+.btn-stop { background: var(--panel); border-color: var(--ink-soft); }
+
+/* The everyday actions are large; deleting and screenshots sit quietly under
+   them so there is never a question about which button starts the job. */
+.btn-row-minor { margin-top: 2px; }
+.btn-small {
+  flex: 0 1 auto;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+
+/* One line saying what to do next — the only instructions in the panel. */
+.guide {
+  margin: 0;
+  padding: 10px 12px 2px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.guide:empty { display: none; }
+.guide-step { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; }
+.guide-num {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
 
 /* ------------------------------------------------------------- notices */
 
@@ -574,8 +611,8 @@ body {
 .nextpage-label { color: var(--muted, #5b6675); }
 .nextpage-what { font-weight: 600; }
 .nextpage-none { color: var(--muted, #5b6675); font-weight: 500; font-style: italic; }
+.nextpage-actions { margin-left: auto; display: flex; gap: 6px; flex: 0 0 auto; }
 .nextpage-btn {
-  margin-left: auto;
   padding: 4px 10px;
   border: 1px solid var(--accent, #1f6feb);
   border-radius: 6px;
@@ -585,7 +622,6 @@ body {
   font-size: 12px;
   cursor: pointer;
 }
-.nextpage-btn + .nextpage-btn { margin-left: 0; }
 .nextpage-btn:hover { background: rgba(31, 111, 235, 0.08); }
 .nextpage-drop { border-color: #b42318; color: #b42318; }
 .nextpage-drop:hover { background: rgba(180, 35, 24, 0.08); }

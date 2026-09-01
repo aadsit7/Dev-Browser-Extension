@@ -17,18 +17,18 @@
   <div id="repeatLine" class="repeat-line" hidden></div>
 </header>
 
+<p id="guide" class="guide"></p>
+
 <section class="controls" aria-label="Controls">
   <div class="btn-row">
-    <button type="button" id="btnStart" class="btn btn-rec">Start Recording</button>
-    <button type="button" id="btnStopRec" class="btn">Stop Recording</button>
-  </div>
-  <div class="btn-row">
-    <button type="button" id="btnShot" class="btn">Screenshot</button>
-    <button type="button" id="btnClear" class="btn btn-danger">Clear</button>
-  </div>
-  <div class="btn-row">
+    <button type="button" id="btnStart" class="btn btn-rec">Record</button>
+    <button type="button" id="btnStopRec" class="btn btn-stop">Stop recording</button>
     <button type="button" id="btnPlay" class="btn btn-play">Play</button>
-    <button type="button" id="btnStopPlay" class="btn">Stop Playback</button>
+    <button type="button" id="btnStopPlay" class="btn btn-stop">Stop</button>
+  </div>
+  <div class="btn-row btn-row-minor">
+    <button type="button" id="btnShot" class="btn btn-small">Take a picture</button>
+    <button type="button" id="btnClear" class="btn btn-small btn-danger">Delete all steps</button>
   </div>
 </section>
 
@@ -43,23 +43,20 @@
   </div>
   <div id="redoBar" class="redo-bar" role="status" aria-live="polite" hidden></div>
   <div id="selectBar" class="select-bar" hidden></div>
-  <p id="emptyMsg" class="empty">
-    Nothing recorded yet. Press <strong>Start Recording</strong>, then use your tabs as normal.
-  </p>
+  <p id="emptyMsg" class="empty">Your steps will show up here.</p>
   <p id="setHint" class="set-hint">
-    Record a click that appears elsewhere on the page — a Connect, an Invite, a Follow —
-    and when you stop recording those steps are grouped into an <strong>action set</strong>
-    and set to <strong>Loop</strong> for you, ready to run down the whole list.
-    You can also tick two or more steps that sit next to each other to group them yourself.
+    <strong>Tip.</strong> Tick two steps that sit next to each other to put them in a
+    <strong>group</strong>. A group is repeated as one thing, so "click, then confirm"
+    stays together.
   </p>
   <ol id="stepList" class="step-list" aria-label="Recorded steps"></ol>
 </section>
 
 <footer class="foot">
-  <p><strong>Safety limits.</strong> Repeat mode never goes above <strong>100</strong> repeats and never
-  waits less than <strong>0.5&nbsp;seconds</strong> between clicks. Many sites' terms of service restrict
-  automated activity, and rapid bulk actions can get an account rate-limited or restricted &mdash; the
-  floor and the ceiling exist to keep you well clear of that.</p>
+  <p><strong>Speed limits, on purpose.</strong> It never repeats more than <strong>100</strong> times
+  and never goes faster than one click every <strong>0.5&nbsp;seconds</strong>. Lots of websites have
+  rules against automatic clicking, and going fast can get your account limited or shut down. These
+  limits keep you well clear of that.</p>
 </footer>
 
 <script src="sidepanel.js"></script>

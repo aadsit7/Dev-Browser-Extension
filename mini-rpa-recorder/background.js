@@ -23,9 +23,9 @@ var PAGE_LOAD_TIMEOUT_MS = 15000; /* wait for the next page to bring rows in */
 var DEFAULT_GROUP_SIZE = 1;
 
 var MATCH_LEVEL_TEXT = {
-  exact: 'exact URL match',
-  page: 'same page (query string ignored)',
-  site: 'same site only',
+  exact: 'same web address',
+  page: 'same page, different search terms',
+  site: 'same website',
   'new': 'opened a new tab'
 };
 
@@ -441,11 +441,7 @@ function startRedo(id) {
     if (at < 0) return { ok: false, error: 'That step is no longer in the recording.' };
     return chrome.storage.local.set({ mode: 'redo', redoStepId: id })
       .then(injectIntoAllTabs)
-      .then(function () {
-        return notice('Re-recording step ' + (at + 1) + '. Go to the page and do that one ' +
-                      'action — the next thing you do replaces it, and recording stops there.',
-                      'info');
-      })
+      .then(function () { return notice('', 'info'); })
       .then(function () { return { ok: true }; });
   });
 }
@@ -466,11 +462,7 @@ function startNextPage(id) {
     }
     return chrome.storage.local.set({ mode: 'nextpage', nextPageForId: id })
       .then(injectIntoAllTabs)
-      .then(function () {
-        return notice('Go to the page and click the control that brings up the next page — Next, ' +
-                      'a chevron, "Load more", whatever it is. The next thing you click is saved ' +
-                      'as that control, and nothing else in the recording changes.', 'info');
-      })
+      .then(function () { return notice('', 'info'); })
       .then(function () { return { ok: true }; });
   });
 }
@@ -1155,7 +1147,7 @@ function startPlayback() {
           }
         });
       })
-      .then(function () { return notice('Playing ' + steps.length + ' steps...', 'info'); })
+      .then(function () { return notice('', 'info'); })
       .then(function () {
         drive();
         return { ok: true };
