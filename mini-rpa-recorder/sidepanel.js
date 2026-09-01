@@ -29,7 +29,8 @@
     list: document.getElementById('stepList'),
     empty: document.getElementById('emptyMsg'),
     count: document.getElementById('stepCount'),
-    selectBar: document.getElementById('selectBar')
+    selectBar: document.getElementById('selectBar'),
+    redoBar: document.getElementById('redoBar')
   };
 
   var steps = [];
@@ -41,6 +42,7 @@
   var countTimers = {};
   var selected = {};        /* step ids ticked for grouping */
   var undoSnapshot = null;  /* the whole list as it was before a delete */
+  var redoingId = null;     /* the step currently being re-recorded */
 
   /* ------------------------------------------------------------ messaging */
 
@@ -302,9 +304,15 @@
     var cls = 'status status-' + mode;
     var detail = '';
     el.statusMode.textContent =
-      mode === 'recording' ? 'Recording' : (mode === 'playing' ? 'Playing' : 'Idle');
+      mode === 'recording' ? 'Recording'
+        : mode === 'playing' ? 'Playing'
+        : mode === 'redo' ? 'Re-recording'
+        : 'Idle';
 
-    if (mode === 'recording') {
+    if (mode === 'redo') {
+      var at = redoingId ? stepIndexById(redoingId) : -1;
+      detail = at >= 0 ? 'replacing step ' + (at + 1) : 'replacing one step';
+    } else if (mode === 'recording') {
       detail = steps.length + ' step' + (steps.length === 1 ? '' : 's') + ' captured';
     } else if (mode === 'playing' && play) {
       detail = 'Step ' + ((play.index || 0) + 1) + ' of ' + (play.total || steps.length);
@@ -389,7 +397,7 @@
   /* ------------------------------------------------------------ step list */
 
   function renderKey() {
-    return steps.map(function (s) {
+    return (redoingId || '') + '#' + steps.map(function (s) {
       return s.id + ':' + s.type + ':' + (s.repeat && s.repeat.enabled ? '1' : '0') +
              ':' + setSizeOf(s) + ':' + (s.set && s.set.collapsed ? 'c' : 'o') +
              ':' + (selected[s.id] ? 's' : '');
@@ -638,11 +646,22 @@
 
   /* ---- one ordinary step row ------------------------------------------ */
 
+  /* The tab is only worth naming when it changes: repeating the same chip down
+   * every row is the single biggest source of clutter in a long recording. */
+  function tabChanged(index) {
+    if (index <= 0) return true;
+    var prev = steps[index - 1];
+    var here = steps[index];
+    if (!prev || !here) return true;
+    return (prev.title || prev.url) !== (here.title || here.url);
+  }
+
   function buildStepRow(step, index, insideSet) {
     var li = document.createElement('li');
     li.className = 'step type-' + step.type + (insideSet ? ' in-set' : '');
     li.dataset.id = step.id;
     if (mode === 'playing' && play && play.index === index) li.className += ' step-current';
+    if (mode === 'redo' && redoingId === step.id) li.className += ' step-redoing';
 
     var main = document.createElement('div');
     main.className = 'step-main';
@@ -663,17 +682,19 @@
     idx.textContent = (index + 1) + '.';
     main.appendChild(idx);
 
-    if (step.type !== 'switchTab') {
+    if (step.type !== 'switchTab' && tabChanged(index)) {
       var chip = document.createElement('span');
       chip.className = 'chip';
       chip.title = step.url || '';
-      chip.textContent = '[' + tabName(step) + ']';
+      chip.textContent = tabName(step);
       main.appendChild(chip);
     }
 
+    var full = describe(step);
     var desc = document.createElement('span');
     desc.className = 'desc';
-    desc.textContent = describe(step);
+    desc.textContent = full;
+    desc.title = full;                    /* the row is one line; nothing is lost */
     main.appendChild(desc);
 
     /* Looping a single step should not require grouping it with anything, so
@@ -689,6 +710,18 @@
       loop.title = 'Run this click once for every matching element on the page';
       loop.textContent = '⟳ Loop';
       main.appendChild(loop);
+    }
+
+    if (mode === 'idle') {
+      var again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'redo-mini';
+      again.dataset.role = 'redo';
+      again.dataset.id = step.id;
+      again.title = 'Do this one action again and replace this step with it';
+      again.setAttribute('aria-label', 'Re-record step ' + (index + 1));
+      again.textContent = '↻';
+      main.appendChild(again);
     }
 
     var x = document.createElement('button');
@@ -714,6 +747,50 @@
   }
 
   /* ---- the selection bar ---------------------------------------------- */
+
+  function renderRedoBar() {
+    var bar = el.redoBar;
+    if (mode !== 'redo') { bar.hidden = true; bar.textContent = ''; return; }
+    bar.hidden = false;
+    bar.textContent = '';
+    var at = redoingId ? stepIndexById(redoingId) : -1;
+    var msg = document.createElement('span');
+    msg.className = 'redo-text';
+    msg.textContent = at >= 0
+      ? 'Re-recording step ' + (at + 1) + '. Go and do that one action — it replaces the step, ' +
+        'and recording stops straight after.'
+      : 'Re-recording one step. Do that action now.';
+    bar.appendChild(msg);
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn';
+    cancel.dataset.role = 'cancelredo';
+    cancel.textContent = 'Cancel';
+    bar.appendChild(cancel);
+  }
+
+  el.redoBar.addEventListener('click', function (e) {
+    if (e.target && e.target.dataset && e.target.dataset.role === 'cancelredo') {
+      actAndReport({ cmd: 'cancelRedo' });
+    }
+  });
+
+  /* After a step is re-recorded its loop still carries the old element's
+   * pattern, which would quietly point at the wrong thing. Work it out again
+   * from what was just recorded, and re-check it against the page. */
+  function fulfilPendingPatterns() {
+    if (mode !== 'idle') return;
+    steps.forEach(function (step) {
+      if (!step.needsPattern || !step.repeat || !step.repeat.enabled) return;
+      if (step.type !== 'click') return;
+      var fresh = derivePattern(step);
+      var updated = Object.assign({}, step.repeat, { pattern: fresh });
+      step.needsPattern = false;
+      saveRepeat(step.id, updated).then(function () {
+        refinePattern(step.id, fresh, step.fallbackText);
+      });
+    });
+  }
 
   function renderSelectionBar() {
     var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
@@ -759,6 +836,11 @@
   /* ---- the list ------------------------------------------------------- */
 
   function renderList(force) {
+    /* Not a rendering concern, and it must not be skipped by the no-change
+     * shortcut below: a re-recorded step keeps the same shape, so the key can
+     * be identical while the loop is still waiting for a usable pattern. */
+    fulfilPendingPatterns();
+
     var key = renderKey();
     if (!force && key === lastRenderKey) {
       highlightCurrent();
@@ -785,6 +867,7 @@
     el.count.textContent = String(steps.length);
     restoreFocus(snap);
     renderSelectionBar();
+    renderRedoBar();
 
     /* While recording, the step that just happened is the one worth seeing;
      * otherwise the list quietly fills up out of sight. */
@@ -871,6 +954,12 @@
     if (!target || !target.dataset || !target.dataset.role) return;
     var role = target.dataset.role;
     var id = target.dataset.id;
+
+    if (role === 'redo') {
+      undoSnapshot = null;
+      actAndReport({ cmd: 'startRedo', id: id });
+      return;
+    }
 
     if (role === 'delete') {
       /* A recording is built by hand and the × has no confirm, so keep the
@@ -1105,6 +1194,7 @@
 
   function applyState(local, playState) {
     mode = (local && local.mode) || 'idle';
+    redoingId = (local && local.redoStepId) || null;
     steps = Array.isArray(local && local.steps) ? local.steps : [];
     play = playState || null;
     renderStatus();
@@ -1136,10 +1226,11 @@
   chrome.storage.onChanged.addListener(function (changes, area) {
     if (area === 'local') {
       if (changes.mode) mode = changes.mode.newValue || 'idle';
+      if (changes.redoStepId) redoingId = changes.redoStepId.newValue || null;
       if (changes.steps) steps = Array.isArray(changes.steps.newValue) ? changes.steps.newValue : [];
       if (changes.notice) renderNotice(changes.notice.newValue);
       if (changes.skipped) renderSkipped(changes.skipped.newValue);
-      if (changes.mode || changes.steps) {
+      if (changes.mode || changes.steps || changes.redoStepId) {
         renderStatus();
         renderButtons();
         renderSize();

@@ -318,13 +318,14 @@ if (window.__miniRpaLoaded) {
 
     /* ----------------------------------------------------------- REC badge */
 
-    function showBadge() {
-      if (document.getElementById(BADGE_ID)) return;
+    function showBadge(label) {
+      var existing = document.getElementById(BADGE_ID);
+      if (existing) { existing.textContent = label || '● REC'; return; }
       var host = document.body || document.documentElement;
       if (!host) return;
       var badge = document.createElement('div');
       badge.id = BADGE_ID;
-      badge.textContent = '● REC';
+      badge.textContent = label || '● REC';
       badge.setAttribute('aria-hidden', 'true');
       badge.style.cssText = [
         'position:fixed', 'top:12px', 'right:12px', 'z-index:2147483647',
@@ -342,17 +343,20 @@ if (window.__miniRpaLoaded) {
       if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
     }
 
-    function setRecording(on) {
+    function setRecording(on, mode) {
       recording = !!on;
-      if (recording) showBadge(); else hideBadge();
+      if (recording) showBadge(mode === 'redo' ? '● REDO' : '● REC'); else hideBadge();
     }
 
     try {
       chrome.storage.local.get('mode').then(function (data) {
-        setRecording(data && data.mode === 'recording');
+        setRecording(data && (data.mode === 'recording' || data.mode === 'redo'), data && data.mode);
       }).catch(function () {});
       chrome.storage.onChanged.addListener(function (changes, area) {
-        if (area === 'local' && changes.mode) setRecording(changes.mode.newValue === 'recording');
+        if (area === 'local' && changes.mode) {
+          var m = changes.mode.newValue;
+          setRecording(m === 'recording' || m === 'redo', m);
+        }
       });
     } catch (e) { /* storage unavailable - stay idle */ }
 

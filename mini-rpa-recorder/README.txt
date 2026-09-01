@@ -51,9 +51,26 @@ between tabs.
           4. Switched to tab: Invites
           5. [Invites] Clicked button 'Accept'
 
+      The list stays deliberately tight: one line per step, and the page name
+      appears only where it changes rather than on every row, so a long
+      recording is still something you can read down. The full wording of any
+      step is on the row itself if it had to be trimmed.
+
       Press "Screenshot" at any point during recording to capture the visible
       part of the current tab. It appears in the list as a thumbnail. Screenshots
       are reference images only - they are skipped during playback.
+
+  Fix one step without redoing the lot
+      The ↻ on any step re-records just that step. Press it, go to the page, do
+      that one action, and it replaces the step - recording stops by itself
+      straight afterwards, so nothing else gets picked up. The step keeps its
+      place, so an action set it belongs to is left exactly as it was. "Cancel"
+      backs out and leaves the step alone.
+
+      If the step you re-recorded had a loop on it, the loop stays on but its
+      match pattern is worked out again from the new element, because the old
+      pattern described the old one. The panel says so, and the "currently
+      matches N" read-out updates - worth a look before you play.
 
   Tidy up
       The small x on any step deletes just that step, and an "Undo" appears in
