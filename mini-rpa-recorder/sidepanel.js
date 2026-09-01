@@ -43,6 +43,7 @@
   var selected = {};        /* step ids ticked for grouping */
   var undoSnapshot = null;  /* the whole list as it was before a delete */
   var redoingId = null;     /* the step currently being re-recorded */
+  var nextPageId = null;    /* the looping step waiting for a next-page control */
 
   /* ------------------------------------------------------------ messaging */
 
@@ -307,9 +308,12 @@
       mode === 'recording' ? 'Recording'
         : mode === 'playing' ? 'Playing'
         : mode === 'redo' ? 'Re-recording'
+        : mode === 'nextpage' ? 'Next page'
         : 'Idle';
 
-    if (mode === 'redo') {
+    if (mode === 'nextpage') {
+      detail = 'waiting for you to click the next-page control';
+    } else if (mode === 'redo') {
       var at = redoingId ? stepIndexById(redoingId) : -1;
       detail = at >= 0 ? 'replacing step ' + (at + 1) : 'replacing one step';
     } else if (mode === 'recording') {
@@ -400,6 +404,10 @@
     return (redoingId || '') + '#' + steps.map(function (s) {
       return s.id + ':' + s.type + ':' + (s.repeat && s.repeat.enabled ? '1' : '0') +
              ':' + setSizeOf(s) + ':' + (s.set && s.set.collapsed ? 'c' : 'o') +
+             /* The next-page control belongs here too: setting or removing one
+              * changes nothing else about the step, so without it the card
+              * would go on saying the loop stops when it no longer does. */
+             ':' + (s.repeat && s.repeat.nextPage ? 'n' + (s.repeat.nextPage.selector || '?') : '') +
              ':' + (selected[s.id] ? 's' : '');
     }).join('|') + '#' + mode;
   }
@@ -591,6 +599,8 @@
       readout.dataset.readoutFor = step.id;
       readout.textContent = 'Checking the active tab…';
       li.appendChild(readout);
+
+      li.appendChild(buildNextPageRow(step));
     }
 
     /* ---- the steps themselves ---- */
@@ -746,33 +756,102 @@
     return li;
   }
 
+  /* One row on a looping card: what to do when this page has nothing left.
+   * Kept beside the repeat count rather than behind "Match pattern and timing",
+   * because carrying on to the next page is an everyday thing to want, not a
+   * setting to go hunting for. */
+  function buildNextPageRow(step) {
+    var row = document.createElement('div');
+    row.className = 'nextpage-bar';
+
+    var label = document.createElement('span');
+    label.className = 'nextpage-label';
+    label.textContent = 'When this page runs out';
+    row.appendChild(label);
+
+    var control = step.repeat && step.repeat.nextPage;
+    if (control) {
+      var what = document.createElement('span');
+      what.className = 'nextpage-what';
+      what.textContent = 'click ' + describeControl(control);
+      row.appendChild(what);
+
+      var change = document.createElement('button');
+      change.type = 'button';
+      change.className = 'nextpage-btn';
+      change.dataset.role = 'nextpage';
+      change.dataset.id = step.id;
+      change.textContent = 'Change';
+      change.title = 'Record a different control to press when the page runs out';
+      row.appendChild(change);
+
+      var drop = document.createElement('button');
+      drop.type = 'button';
+      drop.className = 'nextpage-btn nextpage-drop';
+      drop.dataset.role = 'clearnextpage';
+      drop.dataset.id = step.id;
+      drop.textContent = 'Remove';
+      drop.title = 'Stop when the page runs out, instead of going on';
+      row.appendChild(drop);
+    } else {
+      var stops = document.createElement('span');
+      stops.className = 'nextpage-what nextpage-none';
+      stops.textContent = 'stop';
+      row.appendChild(stops);
+
+      var add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'nextpage-btn';
+      add.dataset.role = 'nextpage';
+      add.dataset.id = step.id;
+      add.textContent = '+ Go to the next page';
+      add.title = 'Record the control that brings up the next page, and keep the loop going there';
+      row.appendChild(add);
+    }
+    return row;
+  }
+
+  function describeControl(control) {
+    var name = squash(control.fallbackText || control.ariaLabel ||
+                      (control.attrs && control.attrs.name) || control.selector || 'it');
+    return "'" + trunc(name, 30) + "'";
+  }
+
   /* ---- the selection bar ---------------------------------------------- */
 
+  /* Both capture modes put the same bar up: go and do one thing on the page,
+   * or cancel. Only the wording and what the click is kept for differ. */
   function renderRedoBar() {
     var bar = el.redoBar;
-    if (mode !== 'redo') { bar.hidden = true; bar.textContent = ''; return; }
+    if (mode !== 'redo' && mode !== 'nextpage') { bar.hidden = true; bar.textContent = ''; return; }
     bar.hidden = false;
     bar.textContent = '';
-    var at = redoingId ? stepIndexById(redoingId) : -1;
     var msg = document.createElement('span');
     msg.className = 'redo-text';
-    msg.textContent = at >= 0
-      ? 'Re-recording step ' + (at + 1) + '. Go and do that one action — it replaces the step, ' +
-        'and recording stops straight after.'
-      : 'Re-recording one step. Do that action now.';
+    if (mode === 'nextpage') {
+      msg.textContent = 'Go to the page and click the control that brings up the next page — ' +
+                        'Next, a chevron, "Load more". Scrolling to reach it is fine; the next ' +
+                        'thing you click is what gets saved.';
+    } else {
+      var at = redoingId ? stepIndexById(redoingId) : -1;
+      msg.textContent = at >= 0
+        ? 'Re-recording step ' + (at + 1) + '. Go and do that one action — it replaces the step, ' +
+          'and recording stops straight after.'
+        : 'Re-recording one step. Do that action now.';
+    }
     bar.appendChild(msg);
     var cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.className = 'btn';
-    cancel.dataset.role = 'cancelredo';
+    cancel.dataset.role = mode === 'nextpage' ? 'cancelnextpage' : 'cancelredo';
     cancel.textContent = 'Cancel';
     bar.appendChild(cancel);
   }
 
   el.redoBar.addEventListener('click', function (e) {
-    if (e.target && e.target.dataset && e.target.dataset.role === 'cancelredo') {
-      actAndReport({ cmd: 'cancelRedo' });
-    }
+    var role = e.target && e.target.dataset && e.target.dataset.role;
+    if (role === 'cancelredo') actAndReport({ cmd: 'cancelRedo' });
+    if (role === 'cancelnextpage') actAndReport({ cmd: 'cancelNextPage' });
   });
 
   /* After a step is re-recorded its loop still carries the old element's
@@ -1081,6 +1160,17 @@
       return;
     }
 
+    if (role === 'nextpage') {
+      undoSnapshot = null;
+      actAndReport({ cmd: 'startNextPage', id: id });
+      return;
+    }
+
+    if (role === 'clearnextpage') {
+      actAndReport({ cmd: 'clearNextPage', id: id });
+      return;
+    }
+
     if (role === 'delete') {
       /* A recording is built by hand and the × has no confirm, so keep the
        * whole list as it was. Snapshotting everything rather than the one step
@@ -1326,6 +1416,7 @@
   function applyState(local, playState) {
     mode = (local && local.mode) || 'idle';
     redoingId = (local && local.redoStepId) || null;
+    nextPageId = (local && local.nextPageForId) || null;
     steps = Array.isArray(local && local.steps) ? local.steps : [];
     play = playState || null;
     renderStatus();
@@ -1359,10 +1450,11 @@
     if (area === 'local') {
       if (changes.mode) mode = changes.mode.newValue || 'idle';
       if (changes.redoStepId) redoingId = changes.redoStepId.newValue || null;
+      if (changes.nextPageForId) nextPageId = changes.nextPageForId.newValue || null;
       if (changes.steps) steps = Array.isArray(changes.steps.newValue) ? changes.steps.newValue : [];
       if (changes.notice) renderNotice(changes.notice.newValue);
       if (changes.skipped) renderSkipped(changes.skipped.newValue);
-      if (changes.mode || changes.steps || changes.redoStepId) {
+      if (changes.mode || changes.steps || changes.redoStepId || changes.nextPageForId) {
         renderStatus();
         renderButtons();
         renderSize();
