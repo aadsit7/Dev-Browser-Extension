@@ -980,41 +980,56 @@
       'to load more as it goes. Press Looping to turn it off.';
   }
 
+  /* The click that leads the loop is the first one that turns out to have
+   * company on the page - not simply the first click recorded. Somebody who
+   * searches, filters, then works the results has clicked two things before
+   * reaching the row that repeats, and anchoring on the search button would
+   * loop the wrong thing and swallow the whole recording into one set.
+   * Steps before the anchor stay outside the set and run once, which is what
+   * a search before a loop should do.
+   *
+   * analyzePattern rather than previewPattern: this runs on its own, and
+   * previewPattern scrolls the page and flashes an outline round every match,
+   * which would be a jolt nobody asked for. */
+  function firstRepeatable(list, from, budget) {
+    for (var i = from; i < list.length; i++) {
+      if (list[i].type !== 'click') continue;
+      if (budget <= 0) break;
+      var at = i;
+      var step = list[i];
+      var pattern = derivePattern(step);
+      return ask({
+        cmd: 'analyzePattern', pattern: pattern,
+        text: step.fallbackText, prefix: stablePrefix(step.ariaLabel || ''),
+        signature: signatureOfStep(step)
+      }).then(function (look) {
+        /* One match on its own proves nothing - it is as likely to be the
+         * control just clicked, still sitting there, as another row. What
+         * settles it is a match that is demonstrably a different element.
+         * Where the page gives its elements nothing to tell them apart by,
+         * several matches is the best evidence there is. */
+        if (look && look.ok !== false && (look.elsewhere >= 1 || look.count >= 2)) {
+          return { at: at, step: step, pattern: pattern, count: look.count };
+        }
+        return firstRepeatable(list, at + 1, budget - 1);
+      });
+    }
+    return Promise.resolve(null);
+  }
+
   function offerRepeat() {
     /* Read the recording back rather than trusting what is in hand: the mode
      * and the steps reach the panel as separate storage writes. */
     return ask({ cmd: 'getState' }).then(function (res) {
       var list = (res && res.ok && res.local && Array.isArray(res.local.steps)) ? res.local.steps : [];
       if (!list.length || arranged(list)) return;
-      var at = -1;
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].type === 'click') { at = i; break; }
-      }
-      if (at < 0) return;                  /* nothing here that could lead a loop */
-
-      var anchor = list[at];
-      var size = sameTabRun(list, at);
-      var pattern = derivePattern(anchor);
-
-      /* analyzePattern rather than previewPattern: this runs on its own, and
-       * previewPattern scrolls the page and flashes an outline round every
-       * match, which would be a jolt nobody asked for. */
-      return ask({
-        cmd: 'analyzePattern', pattern: pattern,
-        text: anchor.fallbackText, prefix: stablePrefix(anchor.ariaLabel || ''),
-        signature: signatureOfStep(anchor)
-      }).then(function (look) {
-        if (!look || look.ok === false) return;
-        /* One match on its own proves nothing - it is as likely to be the
-         * control just clicked, still sitting there, as another row. What
-         * settles it is a match that is demonstrably a different element.
-         * Where the page gives its elements nothing to tell them apart by,
-         * several matches is the best evidence there is. */
-        var isList = look.elsewhere >= 1 || look.count >= 2;
-        if (!isList) return;
+      return firstRepeatable(list, 0, 6).then(function (found) {
+        if (!found) return;
+        var anchor = found.step;
+        var size = sameTabRun(list, found.at);
         var repeat = {
           enabled: true,
-          pattern: pattern,
+          pattern: found.pattern,
           maxRepeats: DEFAULT_MAX_REPEATS,
           delaySeconds: DEFAULT_DELAY_SECONDS,
           onMissing: 'stop'
@@ -1027,8 +1042,8 @@
           /* An attribute alone cannot tell a row that still needs doing from
            * one already actioned, so the wording gets pinned the same way it
            * would if the user had pressed Loop themselves. */
-          refinePattern(anchor.id, pattern, anchor.fallbackText);
-          showLocalNotice(repeatSetUpNotice(size, look.count), 'info');
+          refinePattern(anchor.id, found.pattern, anchor.fallbackText);
+          showLocalNotice(repeatSetUpNotice(size, found.count), 'info');
         });
       });
     }).catch(function () { /* leave the recording exactly as it was */ });

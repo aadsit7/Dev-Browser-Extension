@@ -112,6 +112,11 @@ panel says so:
 
 So the whole job is: record Connect, confirm in the pop-out, stop, press Play.
 
+The click that leads the loop is the first one that turns out to have company on
+the page, not simply the first one you recorded. If you search, filter and then
+work the results, the search and the filter stay outside the set and run once,
+and the row click is what repeats - which is what you meant.
+
 What counts as "other elements" is deliberately strict. One match on its own
 proves nothing - it is as likely to be the button you just pressed, still
 sitting there, as another row. What settles it is a match that is demonstrably a
