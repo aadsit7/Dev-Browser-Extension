@@ -18,6 +18,8 @@ var FOLLOWER_TIMEOUT_MS = 5000;  /* per follow-on step when misses are skipped *
 var FOLLOWER_STRICT_MS = 10000; /* per follow-on step when a miss stops the run */
 var SETTLE_TIMEOUT_MS = 8000;   /* wait for a dialog to clear between passes */
 var RESCUE_LIMIT = 3;          /* scroll-to-load attempts per repeat step */
+var PAGE_TURN_LIMIT = 20;      /* hard ceiling on next-page presses in one run */
+var PAGE_LOAD_TIMEOUT_MS = 15000; /* wait for the next page to bring rows in */
 var DEFAULT_GROUP_SIZE = 1;
 
 var MATCH_LEVEL_TEXT = {
@@ -140,7 +142,11 @@ function normalizeRepeat(repeat) {
      * default because a half-finished pass usually means the action never
      * completed - the invitation was never sent, the dialog is still up - and
      * carrying on from there quietly does the wrong thing to every row after. */
-    onMissing: r.onMissing === 'skip' ? 'skip' : 'stop'
+    onMissing: r.onMissing === 'skip' ? 'skip' : 'stop',
+    /* An optional control to press when this page has nothing left - Next,
+     * a chevron, "Load more". Recorded the same way any click is, so it is
+     * found at playback by exactly the same rules. */
+    nextPage: r.nextPage && r.nextPage.selector !== undefined ? r.nextPage : null
   };
 }
 
@@ -444,6 +450,98 @@ function startRedo(id) {
   });
 }
 
+/* Record one click and keep it as the loop's next-page control. Same shape as
+ * re-recording a step - the user goes and clicks the thing, and the next click
+ * is what gets saved - because that is the only way to be sure it is the
+ * control they actually mean. */
+function startNextPage(id) {
+  return getLocal('steps').then(function (d) {
+    var steps = Array.isArray(d.steps) ? d.steps : [];
+    var at = -1;
+    for (var i = 0; i < steps.length; i++) if (steps[i].id === id) { at = i; break; }
+    if (at < 0) return { ok: false, error: 'That step is no longer in the recording.' };
+    if (!(steps[at].repeat && steps[at].repeat.enabled)) {
+      return { ok: false, error: 'Turn Loop on first — the next-page control is what the loop ' +
+                                 'presses when the page runs out.' };
+    }
+    return chrome.storage.local.set({ mode: 'nextpage', nextPageForId: id })
+      .then(injectIntoAllTabs)
+      .then(function () {
+        return notice('Go to the page and click the control that brings up the next page — Next, ' +
+                      'a chevron, "Load more", whatever it is. The next thing you click is saved ' +
+                      'as that control, and nothing else in the recording changes.', 'info');
+      })
+      .then(function () { return { ok: true }; });
+  });
+}
+
+function cancelNextPage() {
+  return chrome.storage.local.set({ mode: 'idle', nextPageForId: null })
+    .then(function () {
+      return notice('Cancelled — the loop still stops when the page runs out.', 'info');
+    })
+    .then(function () { return { ok: true }; });
+}
+
+function clearNextPage(id) {
+  return serialize(function () {
+    return getLocal('steps').then(function (d) {
+      var steps = Array.isArray(d.steps) ? d.steps.slice() : [];
+      var at = -1;
+      for (var i = 0; i < steps.length; i++) if (steps[i].id === id) { at = i; break; }
+      if (at < 0) return { ok: false, error: 'That step is no longer in the recording.' };
+      if (!steps[at].repeat) return { ok: true };
+      steps[at] = Object.assign({}, steps[at], {
+        repeat: Object.assign({}, steps[at].repeat, { nextPage: null })
+      });
+      return saveSteps(steps)
+        .then(function () {
+          return notice('Next-page control removed — the loop now stops when the page runs out.', 'info');
+        })
+        .then(function () { return { ok: true }; });
+    });
+  });
+}
+
+/* Only a click can be a next-page control, and getting to the button often
+ * means scrolling first, so anything else recorded here is ignored rather than
+ * taken as the answer. */
+function applyNextPage(step) {
+  return serialize(function () {
+    return getLocal(['mode', 'nextPageForId', 'steps']).then(function (s) {
+      if (s.mode !== 'nextpage' || !s.nextPageForId) return { ok: false, error: 'not capturing' };
+      if (step.type !== 'click') return { ok: true };
+      var steps = Array.isArray(s.steps) ? s.steps.slice() : [];
+      var at = -1;
+      for (var i = 0; i < steps.length; i++) if (steps[i].id === s.nextPageForId) { at = i; break; }
+      if (at < 0) {
+        return chrome.storage.local.set({ mode: 'idle', nextPageForId: null })
+          .then(function () { return { ok: false, error: 'that step has gone' }; });
+      }
+      var owner = steps[at];
+      var control = {
+        type: 'click',
+        selector: step.selector || '',
+        tagName: step.tagName || '',
+        ariaLabel: step.ariaLabel || '',
+        fallbackText: step.fallbackText || '',
+        value: '',
+        attrs: step.attrs || {}
+      };
+      steps[at] = Object.assign({}, owner, {
+        repeat: Object.assign({}, owner.repeat || {}, { nextPage: control })
+      });
+      return chrome.storage.local.set({ mode: 'idle', nextPageForId: null })
+        .then(function () { return saveSteps(steps); })
+        .then(function () {
+          return notice('Saved. When the page runs out, the loop will click ' +
+                        shortLabel(control) + ' and carry on there.', 'ok');
+        })
+        .then(function () { return { ok: true }; });
+    });
+  });
+}
+
 function cancelRedo() {
   return chrome.storage.local.set({ mode: 'idle', redoStepId: null })
     .then(function () { return notice('Re-recording cancelled — the step is unchanged.', 'info'); })
@@ -678,6 +776,13 @@ function runRepeatPass(step, index, steps, tabId) {
   var noEffect = 0;
   var missedPasses = 0;
   var skippedFollowers = 0;
+  var pageTurns = 0;
+  /* Scrolling to load more is the right first guess on an endless list, but
+   * where a next-page control was recorded the page is paged, not endless -
+   * one scroll that reveals nothing settles it, and the rest would be six
+   * seconds of nothing on every page. A scroll that does reveal rows still
+   * resets the count, so an endless list inside a paged one keeps working. */
+  var scrollBudget = cfg.nextPage ? 1 : RESCUE_LIMIT;
 
   function finish(reason) {
     var text = 'Step ' + (index + 1) + ' (repeat): ' + reason;
@@ -742,6 +847,61 @@ function runRepeatPass(step, index, steps, tabId) {
     });
   }
 
+  /* The list on this page is finished. With a next-page control recorded, press
+   * it and carry on there; without one, this is the end of the run. The round
+   * count and the delay between clicks keep applying across pages, so the
+   * safety limits still bound the whole thing. */
+  function turnPage() {
+    if (!cfg.nextPage) {
+      return finish('No more matching elements (after ' + rescues +
+                    ' scroll-to-load attempts) - stopped after ' + rounds + ' pass(es).');
+    }
+    if (pageTurns >= PAGE_TURN_LIMIT) {
+      return finish('Reached the limit of ' + PAGE_TURN_LIMIT + ' page turns - stopped after ' +
+                    rounds + ' pass(es).');
+    }
+    pageTurns += 1;
+    return setPlay({ repeatNote: 'this page is done - going to the next one (turn ' + pageTurns + ')' })
+      .then(function () {
+        return ask({ cmd: 'playStep', step: cfg.nextPage, timeoutMs: FOLLOWER_STRICT_MS });
+      })
+      .then(function (res) {
+        if (!res || res.ok === false) {
+          return finish('This page is done and the next-page control could not be used (' +
+                        ((res && res.error) || 'no answer from the page') +
+                        ') - stopped after ' + rounds + ' pass(es).');
+        }
+        return awaitNextPage();
+      });
+  }
+
+  /* A page turn is not instant and the new rows arrive when they arrive, so
+   * wait for the pattern to find something rather than guessing at a delay. */
+  function awaitNextPage() {
+    var end = Date.now() + PAGE_LOAD_TIMEOUT_MS;
+    function look() {
+      return stillRunning().then(function (running) {
+        if (!running) return finish('Stopped by you after ' + rounds + ' pass(es).');
+        return ask({ cmd: 'repeatProbe', pattern: cfg.pattern }).then(function (probe) {
+          if (probe && probe.ok !== false && probe.count > 0) {
+            /* Everything the counters know is about the page just left. */
+            rescues = 0;
+            stall = 0;
+            lastCount = -1;
+            noEffect = 0;
+            return round();
+          }
+          if (Date.now() >= end) {
+            return finish('Turned the page ' + pageTurns + ' time(s), and nothing matching turned ' +
+                          'up on the last one - stopped after ' + rounds + ' pass(es).');
+          }
+          return sleep(400).then(look);
+        });
+      });
+    }
+    return look();
+  }
+
   function round() {
     return stillRunning().then(function (running) {
       if (!running) return finish('Stopped by you after ' + rounds + ' pass(es).');
@@ -773,15 +933,12 @@ function runRepeatPass(step, index, steps, tabId) {
         }
 
         if (!out.clicked) {
-          if (rescues >= RESCUE_LIMIT) {
-            return finish('No more matching elements (after ' + rescues +
-                          ' scroll-to-load attempts) - stopped after ' + rounds + ' pass(es).');
-          }
+          if (rescues >= scrollBudget) return turnPage();
           rescues += 1;
           var before = out.countBefore;
           return setPlay({
             repeatNote: 'nothing left in view - scrolling down to load more (attempt ' +
-                        rescues + ' of ' + RESCUE_LIMIT + ')'
+                        rescues + ' of ' + scrollBudget + ')'
           }).then(function () {
             return ask({ cmd: 'repeatRescue', pattern: cfg.pattern });
           }).then(function (res) {
@@ -1153,6 +1310,15 @@ function handleMessage(msg, sender) {
     case 'startRedo':
       return startRedo(msg.id);
 
+    case 'startNextPage':
+      return startNextPage(msg.id);
+
+    case 'cancelNextPage':
+      return cancelNextPage();
+
+    case 'clearNextPage':
+      return clearNextPage(msg.id);
+
     case 'cancelRedo':
       return cancelRedo();
 
@@ -1226,7 +1392,9 @@ function handleMessage(msg, sender) {
 
     case 'recordStep':
       return getLocal('mode').then(function (d) {
-        if (d.mode !== 'recording' && d.mode !== 'redo') return { ok: false, error: 'not recording' };
+        if (d.mode !== 'recording' && d.mode !== 'redo' && d.mode !== 'nextpage') {
+          return { ok: false, error: 'not recording' };
+        }
         var step = msg.step || {};
         step.id = uid();
         /* Tab identity is url + title, tagged here from the real sender. */
@@ -1234,6 +1402,7 @@ function handleMessage(msg, sender) {
         step.title = (sender && sender.tab && sender.tab.title) || step.title || hostOf(step.url);
         if (!step.repeat) step.repeat = null;
         if (d.mode === 'redo') return applyRedo(step);
+        if (d.mode === 'nextpage') return applyNextPage(step);
         var key = msg.coalesceKey ? msg.coalesceKey + '@' + step.url : null;
         /* One serialized job, so the "switched to tab" step can never land
          * after the action that provoked it. */

@@ -161,6 +161,41 @@ timing", closed by default.
 Steps inside a set run only inside it - they are not replayed again afterwards
 - and a set cannot contain another looping step.
 
+WHEN THIS PAGE RUNS OUT
+
+A looping card carries one more line, under the repeat count:
+
+    When this page runs out    stop    [+ Go to the next page]
+
+Left alone, the loop stops when the page has nothing left - which is what it
+has always done. Press "+ Go to the next page" and the panel waits while you go
+to the page and click the control that brings up the next one: Next, a chevron,
+"Load more", whatever the site calls it. The next thing you click is saved as
+that control.
+
+Nothing else changes. It is not added as a step, the steps you recorded are
+untouched, and a loop that was already set up keeps its pattern, its count and
+its timing. The card then reads:
+
+    When this page runs out    click 'Next'    [Change] [Remove]
+
+From then on, when the page runs out the loop presses that control, waits for
+the new rows to arrive, and carries straight on there. "Remove" puts it back to
+stopping.
+
+The safety limits still bound the whole run, not each page: "Repeat up to 25"
+means twenty-five rows in total however many pages they are spread over, and
+the delay between clicks applies across page turns too. On top of that it will
+turn the page at most twenty times in one run, and it stops if a page turn
+brings up nothing matching - a Next button that has stopped working, or the end
+of the results.
+
+One thing changes when a next-page control is set: the loop scrolls to look for
+more only once before turning the page, instead of three times. A paged list is
+not an endless one, and three fruitless scrolls would be six seconds of nothing
+on every page. A scroll that does bring rows in still counts as progress, so an
+endless list inside a paged one keeps working as before.
+
 SHOW ME ON THE PAGE
 
 Press it and every element the loop would act on is outlined on the page in

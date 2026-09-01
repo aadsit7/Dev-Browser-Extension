@@ -545,17 +545,20 @@ if (window.__miniRpaLoaded) {
 
     function setRecording(on, mode) {
       recording = !!on;
-      if (recording) showBadge(mode === 'redo' ? '● REDO' : '● REC'); else hideBadge();
+      if (recording) {
+        showBadge(mode === 'redo' ? '● REDO' : mode === 'nextpage' ? '● NEXT PAGE' : '● REC');
+      } else hideBadge();
     }
 
     try {
       chrome.storage.local.get('mode').then(function (data) {
-        setRecording(data && (data.mode === 'recording' || data.mode === 'redo'), data && data.mode);
+        setRecording(data && (data.mode === 'recording' || data.mode === 'redo' ||
+                              data.mode === 'nextpage'), data && data.mode);
       }).catch(function () {});
       chrome.storage.onChanged.addListener(function (changes, area) {
         if (area === 'local' && changes.mode) {
           var m = changes.mode.newValue;
-          setRecording(m === 'recording' || m === 'redo', m);
+          setRecording(m === 'recording' || m === 'redo' || m === 'nextpage', m);
         }
       });
     } catch (e) { /* storage unavailable - stay idle */ }

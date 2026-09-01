@@ -558,3 +558,34 @@ body {
   line-height: 1.5;
   color: var(--ink-soft);
 }
+
+/* When this page runs out — sits with the loop controls, not behind Advanced. */
+.nextpage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-top: 1px dashed var(--line, #d7dde5);
+  font-size: 13px;
+}
+.nextpage-bar[hidden] { display: none; }
+.nextpage-label { color: var(--muted, #5b6675); }
+.nextpage-what { font-weight: 600; }
+.nextpage-none { color: var(--muted, #5b6675); font-weight: 500; font-style: italic; }
+.nextpage-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--accent, #1f6feb);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent, #1f6feb);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.nextpage-btn + .nextpage-btn { margin-left: 0; }
+.nextpage-btn:hover { background: rgba(31, 111, 235, 0.08); }
+.nextpage-drop { border-color: #b42318; color: #b42318; }
+.nextpage-drop:hover { background: rgba(180, 35, 24, 0.08); }
