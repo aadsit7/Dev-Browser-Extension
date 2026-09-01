@@ -929,6 +929,111 @@
     }, COUNT_DEBOUNCE_MS);
   }
 
+  /* ------------------------------------------------- spotting a repeat */
+
+  /* "Click Connect, then confirm in the pop-out" is almost never meant to
+   * happen once - it is a process to run down a whole list. Rather than leave
+   * the user to go and find the grouping controls, the panel works that out
+   * the moment a recording ends: if the click they started with still matches
+   * other elements on the page, the recorded steps are grouped and set to
+   * loop, ready to play. One press of Looping turns it back off. */
+
+  /* How much of the recording belongs to the process: from the first click up
+   * to the point it moves to another tab. */
+  function sameTabRun(list, from) {
+    var end = list.length;
+    for (var i = from + 1; i < list.length; i++) {
+      var prev = list[i - 1];
+      var here = list[i];
+      if ((prev.title || prev.url) !== (here.title || here.url)) { end = i; break; }
+    }
+    /* A scroll recorded at the end was the user reaching the next row by hand.
+     * The loop scrolls for itself when it runs out of matches, and replaying a
+     * fixed scroll position every round would fight it. */
+    while (end - 1 > from && list[end - 1].type === 'scroll') end -= 1;
+    return end - from;
+  }
+
+  /* Anything the user has already arranged is left exactly as they left it. */
+  function arranged(list) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].set) return true;
+      if (list[i].repeat && list[i].repeat.enabled) return true;
+    }
+    return false;
+  }
+
+  /* What identifies the element the user actually clicked, in the same terms
+   * the page is asked about - never its wording, which is the thing the action
+   * changes. */
+  function signatureOfStep(step) {
+    var a = step.attrs || {};
+    return squash(step.ariaLabel || a.id || a.testId || a.name || '');
+  }
+
+  function repeatSetUpNotice(size, count) {
+    return 'This looks like a repeating process, so it is set up to loop: ' +
+      (size === 1 ? 'that step runs' : 'those ' + size + ' steps run') +
+      ' once for each match, and ' + count +
+      (count === 1 ? ' element matches' : ' elements match') +
+      ' on this page right now. Press Play to run it down the list — it scrolls ' +
+      'to load more as it goes. Press Looping to turn it off.';
+  }
+
+  function offerRepeat() {
+    /* Read the recording back rather than trusting what is in hand: the mode
+     * and the steps reach the panel as separate storage writes. */
+    return ask({ cmd: 'getState' }).then(function (res) {
+      var list = (res && res.ok && res.local && Array.isArray(res.local.steps)) ? res.local.steps : [];
+      if (!list.length || arranged(list)) return;
+      var at = -1;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].type === 'click') { at = i; break; }
+      }
+      if (at < 0) return;                  /* nothing here that could lead a loop */
+
+      var anchor = list[at];
+      var size = sameTabRun(list, at);
+      var pattern = derivePattern(anchor);
+
+      /* analyzePattern rather than previewPattern: this runs on its own, and
+       * previewPattern scrolls the page and flashes an outline round every
+       * match, which would be a jolt nobody asked for. */
+      return ask({
+        cmd: 'analyzePattern', pattern: pattern,
+        text: anchor.fallbackText, prefix: stablePrefix(anchor.ariaLabel || ''),
+        signature: signatureOfStep(anchor)
+      }).then(function (look) {
+        if (!look || look.ok === false) return;
+        /* One match on its own proves nothing - it is as likely to be the
+         * control just clicked, still sitting there, as another row. What
+         * settles it is a match that is demonstrably a different element.
+         * Where the page gives its elements nothing to tell them apart by,
+         * several matches is the best evidence there is. */
+        var isList = look.elsewhere >= 1 || look.count >= 2;
+        if (!isList) return;
+        var repeat = {
+          enabled: true,
+          pattern: pattern,
+          maxRepeats: DEFAULT_MAX_REPEATS,
+          delaySeconds: DEFAULT_DELAY_SECONDS,
+          onMissing: 'stop'
+        };
+        var write = size >= 2
+          ? saveSet(anchor.id, { size: size, name: '', collapsed: false })
+              .then(function () { return saveRepeat(anchor.id, repeat); })
+          : saveRepeat(anchor.id, repeat);
+        return write.then(function () {
+          /* An attribute alone cannot tell a row that still needs doing from
+           * one already actioned, so the wording gets pinned the same way it
+           * would if the user had pressed Loop themselves. */
+          refinePattern(anchor.id, pattern, anchor.fallbackText);
+          showLocalNotice(repeatSetUpNotice(size, look.count), 'info');
+        });
+      });
+    }).catch(function () { /* leave the recording exactly as it was */ });
+  }
+
   /* --------------------------------------------------------- step editing */
 
   function stepById(id) {
@@ -1192,6 +1297,17 @@
 
   /* ------------------------------------------------------------ state sync */
 
+  /* Recording ending is the one moment there is something to look at and the
+   * user has not started arranging it. Both paths that change mode come
+   * through here so the offer is made exactly once. */
+  var lastMode = 'idle';
+
+  function noteMode() {
+    var was = lastMode;
+    lastMode = mode;
+    if (was === 'recording' && mode === 'idle') offerRepeat();
+  }
+
   function applyState(local, playState) {
     mode = (local && local.mode) || 'idle';
     redoingId = (local && local.redoStepId) || null;
@@ -1203,6 +1319,7 @@
     renderSkipped(local && local.skipped);
     renderSize();
     renderList(false);
+    noteMode();
   }
 
   function loadState() {
@@ -1236,6 +1353,7 @@
         renderSize();
         renderList(false);
       }
+      if (changes.mode) noteMode();
     } else if (area === 'session') {
       if (changes.play) {
         play = changes.play.newValue || null;
