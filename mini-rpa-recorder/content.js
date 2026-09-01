@@ -725,22 +725,72 @@ if (window.__miniRpaLoaded) {
       fireInputAndChange(el);
     }
 
+    /* The kinds of box in which an Enter means "submit this form". The browser
+     * submits a form that has no submit button only when the form holds
+     * exactly one of these, which is the rule followed below. */
+    var ENTER_SUBMITS = {
+      text: 1, search: 1, url: 1, tel: 1, email: 1, password: 1, number: 1,
+      date: 1, month: 1, week: 1, time: 1, 'datetime-local': 1
+    };
+
+    /* What the browser does of its own accord after an Enter that nobody
+     * cancelled. A synthetic key event carries no default action, so without
+     * this an Enter recorded in a search box replays as nothing at all on a
+     * page that leaves the submitting to the browser.
+     *
+     * Only the button-less form is handled here, on purpose. Where the form has
+     * a submit button, a real Enter clicks that button and the browser marks
+     * that click as trusted - so it was recorded as a click step of its own,
+     * and that step does the submitting at playback. Doing it here as well
+     * would submit twice. */
+    function enterDefault(el) {
+      if (!el || (el.tagName || '').toLowerCase() !== 'input') return;
+      if (!ENTER_SUBMITS[String(el.type || 'text').toLowerCase()]) return;
+      var form = el.form || closestDeep(el, 'form');
+      if (!form || !form.elements) return;
+      var controls = form.elements;
+      var fields = 0;
+      for (var i = 0; i < controls.length; i++) {
+        var c = controls[i];
+        var tag = (c.tagName || '').toLowerCase();
+        var type = String(c.type || '').toLowerCase();
+        if ((tag === 'button' && type === 'submit') || (tag === 'input' && (type === 'submit' || type === 'image'))) {
+          return;                /* the button's own click step covers this */
+        }
+        if (tag === 'input' && ENTER_SUBMITS[type]) fields += 1;
+      }
+      if (fields !== 1) return;
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.submit();
+    }
+
     function pressKey(el, key) {
       try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
       var codes = { Enter: 13, Tab: 9, Escape: 27 };
       var legacy = codes[key] || 0;
-      ['keydown', 'keyup'].forEach(function (type) {
+      function fire(type, charCode) {
         /* keyCode and which have to go through the constructor. Setting them as
          * expandos afterwards looks right from here but never reaches the page:
          * this script runs in an isolated world, and the page sees its own
          * wrapper of the event without any properties added on this side. Plenty
          * of sites still gate on keyCode === 13, so a 0 here means the Enter
          * simply does nothing. */
-        el.dispatchEvent(new KeyboardEvent(type, {
-          key: key, code: key, keyCode: legacy, which: legacy, charCode: 0,
+        return el.dispatchEvent(new KeyboardEvent(type, {
+          key: key, code: key, keyCode: legacy, which: legacy, charCode: charCode || 0,
           bubbles: true, cancelable: true, composed: true
         }));
-      });
+      }
+      /* dispatchEvent answers false when a handler called preventDefault -
+       * the page saying it has dealt with the key itself - and only then is
+       * the browser's own follow-through left out, just as for a real key.
+       * Enter is also the one of these keys that produces a keypress, and a
+       * fair few older pages listen for that rather than keydown. */
+      var allowed = fire('keydown');
+      if (key === 'Enter' && allowed) allowed = fire('keypress', legacy);
+      if (key === 'Enter' && allowed) {
+        try { enterDefault(el); } catch (e) { /* the page can refuse; the key was still pressed */ }
+      }
+      fire('keyup');
     }
 
     /* --------------------------------------------------- single-step replay */

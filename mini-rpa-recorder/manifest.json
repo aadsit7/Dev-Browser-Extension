@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Mini RPA Recorder",
-  "version": "1.0.0",
-  "description": "Record clicks and typing across your browser tabs, then replay them automatically.",
+  "version": "1.1.0",
+  "description": "Record clicks and typing across your browser tabs, replay them automatically, and keep a library of saved recordings.",
   "side_panel": {
     "default_path": "sidepanel.html"
   },

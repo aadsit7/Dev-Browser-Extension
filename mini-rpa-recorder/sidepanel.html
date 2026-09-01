@@ -52,6 +52,32 @@
   <ol id="stepList" class="step-list" aria-label="Recorded steps"></ol>
 </section>
 
+<section class="library" aria-label="Saved recordings">
+  <details id="libraryBox" class="library-box">
+    <summary class="library-head">
+      <span class="steps-title">Saved recordings</span>
+      <span id="libraryCount" class="pill">0</span>
+      <span id="libraryLoaded" class="library-loaded" hidden></span>
+    </summary>
+    <div class="save-row">
+      <input type="text" id="saveName" class="save-name" placeholder="Name the steps above to keep them…"
+             maxlength="80" spellcheck="false" autocomplete="off"
+             aria-label="Name for the saved recording">
+      <button type="button" id="btnSave" class="btn btn-small btn-save">Save</button>
+    </div>
+    <p id="libraryEmpty" class="library-empty">Nothing saved yet. Save the steps above under a name and they
+      stay here, so you can record another job and come back to this one later.</p>
+    <ul id="libraryList" class="library-list" aria-label="Saved recordings"></ul>
+    <div class="library-foot">
+      <button type="button" id="btnImport" class="link-btn">Import from a file…</button>
+      <button type="button" id="btnExportCurrent" class="link-btn">Export the steps above</button>
+      <span id="storageUse" class="storage-use"
+            title="Saved recordings and the current steps share this space. Screenshots are what fills it."></span>
+    </div>
+    <input type="file" id="importFile" accept=".json,application/json" hidden>
+  </details>
+</section>
+
 <footer class="foot">
   <p><strong>Speed limits, on purpose.</strong> It never repeats more than <strong>100</strong> times
   and never goes faster than one click every <strong>0.5&nbsp;seconds</strong>. Lots of websites have
