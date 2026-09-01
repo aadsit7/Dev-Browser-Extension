@@ -390,6 +390,19 @@ boundaries:
   - Elements are found by selector first, then by tag plus visible text. A page
     that changes its wording between recording and playback can break a step.
 
+  - Pop-outs built inside a shadow root are handled. A shadow root is a
+    self-contained pocket of page that some sites build their dialogs in, and
+    it takes a bit of care to see into: a click that happens inside one is
+    reported against the container holding it rather than the button that was
+    pressed. Both recording and playback look through them, however deeply they
+    are nested, so a confirm button in a pop-out records as that button and
+    replays as a click on it.
+
+    The exception is a shadow root a site has explicitly marked private, which
+    nothing outside the page itself can look inside. There is no way round that
+    from an extension. It is uncommon, and when it happens the step reports that
+    it could not find the button rather than clicking the wrong thing.
+
   - Only the main page is recorded and replayed. Anything inside an embedded
     frame - some sites put sign-in boxes, payment forms and the occasional
     dialog in one - cannot be seen or clicked. When a step cannot be found and
