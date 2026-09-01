@@ -28,6 +28,8 @@
     sizeWarn: document.getElementById('sizeWarn'),
     list: document.getElementById('stepList'),
     empty: document.getElementById('emptyMsg'),
+    guide: document.getElementById('guide'),
+    setHint: document.getElementById('setHint'),
     count: document.getElementById('stepCount'),
     selectBar: document.getElementById('selectBar'),
     redoBar: document.getElementById('redoBar')
@@ -312,7 +314,7 @@
         : 'Idle';
 
     if (mode === 'nextpage') {
-      detail = 'waiting for you to click the next-page control';
+      detail = 'waiting for you to click the next-page button';
     } else if (mode === 'redo') {
       var at = redoingId ? stepIndexById(redoingId) : -1;
       detail = at >= 0 ? 'replacing step ' + (at + 1) : 'replacing one step';
@@ -341,14 +343,66 @@
     }
   }
 
+  /* Only the buttons that can actually be pressed right now are on screen.
+   * Six buttons with four of them greyed out is a puzzle to solve before you
+   * can start; two live ones is an instruction. */
   function renderButtons() {
-    el.btnStart.disabled = mode !== 'idle';
-    el.btnStopRec.disabled = mode !== 'recording';
-    el.btnShot.disabled = mode !== 'recording';
-    el.btnPlay.disabled = mode !== 'idle' || steps.length === 0;
-    el.btnStopPlay.disabled = mode !== 'playing';
-    el.btnClear.disabled = mode !== 'idle' || steps.length === 0;
+    var idle = mode === 'idle';
+    var recording = mode === 'recording';
+    var playing = mode === 'playing';
+    var have = steps.length > 0;
+
+    el.btnStart.disabled = !idle;
+    el.btnStopRec.disabled = !recording;
+    el.btnShot.disabled = !recording;
+    el.btnPlay.disabled = !idle || !have;
+    el.btnStopPlay.disabled = !playing;
+    el.btnClear.disabled = !idle || !have;
+
+    el.btnStart.hidden = !idle;
+    el.btnStopRec.hidden = !recording;
+    el.btnShot.hidden = !recording;
+    el.btnPlay.hidden = !idle || !have;
+    el.btnStopPlay.hidden = !playing;
+    el.btnClear.hidden = !idle || !have;
+
     if (mode !== 'idle') { disarmClear(); selected = {}; }
+    renderGuide();
+  }
+
+  /* One line saying what to do next, rather than a block of description to
+   * read before anything happens. It is the only place in the panel that
+   * gives instructions, so there is never a second one to reconcile it with. */
+  function renderGuide() {
+    var g = el.guide;
+    if (!g) return;
+    g.textContent = '';
+    var looping = steps.some(function (s) { return s.repeat && s.repeat.enabled; });
+    if (mode === 'playing' || mode === 'redo' || mode === 'nextpage') {
+      return;                 /* the status header, or the yellow bar, says it */
+    }
+    if (mode === 'recording') {
+      g.textContent = 'Recording. Go and do the job once on the page — then press ' +
+                      '"Stop recording".';
+    } else if (!steps.length) {
+      g.textContent = '';
+      ['Press Record.', 'Do the job once on the page.', 'Press "Stop recording".']
+        .forEach(function (line, i) {
+          var row = document.createElement('span');
+          row.className = 'guide-step';
+          var num = document.createElement('b');
+          num.className = 'guide-num';
+          num.textContent = String(i + 1);
+          row.appendChild(num);
+          row.appendChild(document.createTextNode(line));
+          g.appendChild(row);
+        });
+      return;
+    } else if (looping) {
+      g.textContent = 'Ready. Press Play and it will do this to every match on the page.';
+    } else {
+      g.textContent = 'Ready. Press Play to do these steps once.';
+    }
   }
 
   /* --------------------------------------------------------------- notices */
@@ -360,14 +414,20 @@
     el.notice.textContent = n.text;
   }
 
+  /* Held on to because whether this is worth showing depends on the mode, and
+   * a mode change arrives on its own without the list. */
+  var skippedTabs = null;
+
   function renderSkipped(list) {
-    if (!list || !list.length) { el.skipped.hidden = true; return; }
+    if (list !== undefined) skippedTabs = list;
+    list = skippedTabs;
+    if (!list || !list.length || mode === 'playing') { el.skipped.hidden = true; return; }
     el.skipped.hidden = false;
     el.skipped.className = 'notice notice-warn';
     el.skipped.textContent = '';
     var head = document.createElement('strong');
-    head.textContent = 'Skipped ' + list.length + ' tab' + (list.length === 1 ? '' : 's') +
-                       ' (recording will not work there):';
+    head.textContent = list.length + ' tab' + (list.length === 1 ? ' was' : 's were') +
+                       ' left out. Recording only works on ordinary web pages:';
     el.skipped.appendChild(head);
     var ul = document.createElement('ul');
     list.slice(0, 8).forEach(function (item) {
@@ -446,7 +506,7 @@
     var wrap = document.createElement('details');
     wrap.className = 'advanced';
     var sum = document.createElement('summary');
-    sum.textContent = 'Match pattern and timing';
+    sum.textContent = 'Advanced settings — most people never need these';
     wrap.appendChild(sum);
 
     var r = step.repeat || {};
@@ -457,7 +517,7 @@
     pattern.dataset.fkey = step.id + ':pattern';
     pattern.dataset.role = 'pattern';
     pattern.dataset.id = step.id;
-    wrap.appendChild(makeField('Which elements to loop over', pattern));
+    wrap.appendChild(makeField('Which things to repeat on', pattern));
 
     var hint = document.createElement('p');
     hint.className = 'hint';
@@ -486,7 +546,7 @@
     delayInput.dataset.fkey = step.id + ':delay';
     delayInput.dataset.role = 'delay';
     delayInput.dataset.id = step.id;
-    twoUp.appendChild(makeField('Wait between loops (s)', delayInput));
+    twoUp.appendChild(makeField('Seconds to wait between clicks', delayInput));
 
     var missing = document.createElement('select');
     missing.dataset.fkey = step.id + ':missing';
@@ -539,8 +599,7 @@
 
     var count = document.createElement('span');
     count.className = 'set-count';
-    count.textContent = size === 1 ? 'step ' + (index + 1)
-                                   : size + ' steps · ' + (index + 1) + '–' + (index + size);
+    count.textContent = size === 1 ? 'step ' + (index + 1) : size + ' steps';
     head.appendChild(count);
 
     var loopBtn = document.createElement('button');
@@ -549,10 +608,10 @@
     loopBtn.dataset.role = 'loop';
     loopBtn.dataset.id = step.id;
     loopBtn.setAttribute('aria-pressed', looping ? 'true' : 'false');
-    loopBtn.textContent = looping ? '⟳ Looping' : '⟳ Loop';
+    loopBtn.textContent = looping ? '⟳ Repeating' : '⟳ Repeat';
     loopBtn.title = step.type === 'click'
-      ? 'Run this set once for every matching element on the page'
-      : 'Looping needs the set to start with a click';
+      ? 'Do these steps once for every match on the page'
+      : 'Repeating only works when the group starts with a click';
     if (step.type !== 'click') loopBtn.disabled = true;
     head.appendChild(loopBtn);
 
@@ -564,7 +623,7 @@
       bar.className = 'loop-bar';
 
       var label = document.createElement('span');
-      label.textContent = 'Repeat up to';
+      label.textContent = 'Do this up to';
       bar.appendChild(label);
 
       var times = document.createElement('input');
@@ -636,7 +695,7 @@
         shrink.className = 'link-btn';
         shrink.dataset.role = 'shrink';
         shrink.dataset.id = step.id;
-        shrink.textContent = '− Drop step ' + (index + size);
+        shrink.textContent = '− Take step ' + (index + size) + ' out of the group';
         edit.appendChild(shrink);
 
         var ungroup = document.createElement('button');
@@ -644,7 +703,7 @@
         ungroup.className = 'link-btn';
         ungroup.dataset.role = 'ungroup';
         ungroup.dataset.id = step.id;
-        ungroup.textContent = 'Ungroup';
+        ungroup.textContent = 'Split into single steps';
         edit.appendChild(ungroup);
       }
       foot.appendChild(edit);
@@ -766,14 +825,14 @@
 
     var label = document.createElement('span');
     label.className = 'nextpage-label';
-    label.textContent = 'When this page runs out';
+    label.textContent = 'At the end of the page:';
     row.appendChild(label);
 
     var control = step.repeat && step.repeat.nextPage;
     if (control) {
       var what = document.createElement('span');
       what.className = 'nextpage-what';
-      what.textContent = 'click ' + describeControl(control);
+      what.textContent = 'go to the next page (clicks ' + describeControl(control) + ')';
       row.appendChild(what);
 
       var change = document.createElement('button');
@@ -783,7 +842,10 @@
       change.dataset.id = step.id;
       change.textContent = 'Change';
       change.title = 'Record a different control to press when the page runs out';
-      row.appendChild(change);
+      var actions = document.createElement('span');
+      actions.className = 'nextpage-actions';
+      actions.appendChild(change);
+      row.appendChild(actions);
 
       var drop = document.createElement('button');
       drop.type = 'button';
@@ -792,11 +854,11 @@
       drop.dataset.id = step.id;
       drop.textContent = 'Remove';
       drop.title = 'Stop when the page runs out, instead of going on';
-      row.appendChild(drop);
+      actions.appendChild(drop);
     } else {
       var stops = document.createElement('span');
       stops.className = 'nextpage-what nextpage-none';
-      stops.textContent = 'stop';
+      stops.textContent = 'it stops.';
       row.appendChild(stops);
 
       var add = document.createElement('button');
@@ -804,9 +866,12 @@
       add.className = 'nextpage-btn';
       add.dataset.role = 'nextpage';
       add.dataset.id = step.id;
-      add.textContent = '+ Go to the next page';
-      add.title = 'Record the control that brings up the next page, and keep the loop going there';
-      row.appendChild(add);
+      add.textContent = 'Go to the next page instead';
+      add.title = 'Record the button that shows the next page, and keep going there';
+      var addWrap = document.createElement('span');
+      addWrap.className = 'nextpage-actions';
+      addWrap.appendChild(add);
+      row.appendChild(addWrap);
     }
     return row;
   }
@@ -890,7 +955,7 @@
     group.type = 'button';
     group.className = 'btn btn-play sel-go';
     group.dataset.role = 'group';
-    group.textContent = 'Group into an action set';
+    group.textContent = 'Put these in a group';
     group.disabled = !contiguous;
     bar.appendChild(group);
 
@@ -943,6 +1008,14 @@
       }
     }
     el.empty.hidden = steps.length > 0;
+    /* The tip about grouping is worth saying only when there are loose steps
+     * sitting next to each other to group. Otherwise it is one more thing to
+     * read that does not apply. */
+    if (el.setHint) {
+      var loose = 0;
+      for (var h = 0; h < steps.length; h++) if (!steps[h].set) loose += 1;
+      el.setHint.hidden = mode !== 'idle' || loose < 2;
+    }
     el.count.textContent = String(steps.length);
     restoreFocus(snap);
     renderSelectionBar();
@@ -1000,7 +1073,7 @@
         var n = res.count;
         setReadout(
           stepId,
-          'Currently matches ' + n + ' element' + (n === 1 ? '' : 's') + ' on the active tab' +
+          'Found ' + n + ' match' + (n === 1 ? '' : 'es') + ' on this page' +
             (res.tabTitle ? ' (' + trunc(res.tabTitle, 30) + ')' : '') + '.',
           n === 0 ? 'none' : ''
         );
@@ -1051,12 +1124,9 @@
   }
 
   function repeatSetUpNotice(size, count) {
-    return 'This looks like a repeating process, so it is set up to loop: ' +
-      (size === 1 ? 'that step runs' : 'those ' + size + ' steps run') +
-      ' once for each match, and ' + count +
-      (count === 1 ? ' element matches' : ' elements match') +
-      ' on this page right now. Press Play to run it down the list — it scrolls ' +
-      'to load more as it goes. Press Looping to turn it off.';
+    return 'Set to repeat: ' + (size === 1 ? 'that step' : 'those ' + size + ' steps') +
+      ' will run on every match found, scrolling down for more as it goes. Press ' +
+      '"Repeating" to turn that off.';
   }
 
   /* The click that leads the loop is the first one that turns out to have
@@ -1364,7 +1434,7 @@
   function disarmClear() {
     clearArmed = false;
     if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
-    el.btnClear.textContent = 'Clear';
+    el.btnClear.textContent = 'Delete all steps';
   }
 
   el.btnStart.addEventListener('click', function () {
@@ -1392,7 +1462,7 @@
   el.btnClear.addEventListener('click', function () {
     if (!clearArmed) {
       clearArmed = true;
-      el.btnClear.textContent = 'Click again to wipe';
+      el.btnClear.textContent = 'Press again to really delete';
       clearTimer = setTimeout(disarmClear, 4000);
       return;
     }
@@ -1458,6 +1528,7 @@
         renderStatus();
         renderButtons();
         renderSize();
+        renderSkipped();
         renderList(false);
       }
       if (changes.mode) noteMode();
