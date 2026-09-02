@@ -1,6 +1,13 @@
 /* Mini RPA Recorder - side panel logic.
  * Manifest V3 forbids inline JavaScript, so every control on sidepanel.html is
- * wired up here with addEventListener. */
+ * wired up here with addEventListener.
+ *
+ * The panel is a flow canvas. Each recorded step is a card; a group of steps
+ * that runs as one thing is a block drawn round its cards; and everything a
+ * card or block can be told lives in a drawer that slides up when it is
+ * clicked. Cards are arranged by dragging them - onto one another to make a
+ * block, into and out of blocks, up and down the flow - and every arrangement
+ * can be undone. */
 
 (function () {
   'use strict';
@@ -26,13 +33,13 @@
     notice: document.getElementById('notice'),
     skipped: document.getElementById('skipped'),
     sizeWarn: document.getElementById('sizeWarn'),
-    list: document.getElementById('stepList'),
+    flow: document.getElementById('flow'),
+    flowHint: document.getElementById('flowHint'),
     empty: document.getElementById('emptyMsg'),
     guide: document.getElementById('guide'),
-    setHint: document.getElementById('setHint'),
     count: document.getElementById('stepCount'),
-    selectBar: document.getElementById('selectBar'),
     redoBar: document.getElementById('redoBar'),
+    drawer: document.getElementById('drawer'),
     libraryBox: document.getElementById('libraryBox'),
     libraryCount: document.getElementById('libraryCount'),
     libraryLoaded: document.getElementById('libraryLoaded'),
@@ -53,10 +60,11 @@
   var clearArmed = false;
   var clearTimer = null;
   var countTimers = {};
-  var selected = {};        /* step ids ticked for grouping */
-  var undoSnapshot = null;  /* the whole list as it was before a delete */
-  var redoingId = null;     /* the step currently being re-recorded */
-  var nextPageId = null;    /* the looping step waiting for a next-page control */
+  var readouts = {};          /* last "matches N" result per looping block */
+  var undoSnapshot = null;    /* the whole list as it was before a delete or a move */
+  var redoingId = null;       /* the step currently being re-recorded */
+  var selection = null;       /* { id, view: 'step' | 'block' } - what the drawer shows */
+  var drag = null;            /* { kind: 'step' | 'block', id } while a card is in the air */
 
   /* ------------------------------------------------------------ messaging */
 
@@ -117,40 +125,70 @@
   function fieldName(step) {
     var a = step.attrs || {};
     var name = step.ariaLabel || a.name || step.fallbackText || step.selector || step.tagName || 'field';
-    return (step.tagName || 'field') + " '" + trunc(name, 34) + "'";
+    return (step.tagName || 'field') + " '" + trunc(name, 30) + "'";
   }
 
-  /* Plain-English description of one recorded step. */
-  function describe(step) {
+  /* What a card says, in the present tense a flow reads in: the action first,
+   * the thing it acts on underneath. */
+  function titleOf(step) {
     var a = step.attrs || {};
-    var label = step.ariaLabel || step.fallbackText || a.name || step.selector || step.tagName || 'element';
     switch (step.type) {
       case 'click':
-        /* Visible text first: "Clicked button 'Accept'" reads better than the
-         * full aria-label, which usually carries a name that varies per row. */
-        return 'Clicked ' + (step.tagName || 'element') + " '" +
-               trunc(step.fallbackText || step.ariaLabel || label, 46) + "'";
+        /* Visible text first: "Click 'Accept'" reads better than the full
+         * aria-label, which usually carries a name that varies per row. */
+        return "Click '" + trunc(step.fallbackText || step.ariaLabel || a.name || step.selector ||
+                                  step.tagName || 'element', 40) + "'";
       case 'input':
-        /* Saying "Cleared" here would be a lie: the value was withheld on
+        /* Saying "Clear" here would be a lie: the value was withheld on
          * purpose, and the user needs to know they must type it at playback. */
-        if (a.type === 'password') return 'Password box ' + fieldName(step) + ' — value not saved, type it yourself';
-        if (!step.value) return 'Cleared ' + fieldName(step);
-        return 'Typed "' + trunc(step.value, 34) + '" into ' + fieldName(step);
+        if (a.type === 'password') return 'Type the password yourself';
+        if (!step.value) return 'Clear ' + fieldName(step);
+        return 'Type "' + trunc(step.value, 30) + '"';
       case 'change':
-        if (step.value === 'true') return 'Ticked ' + fieldName(step);
-        if (step.value === 'false') return 'Unticked ' + fieldName(step);
-        return 'Set ' + fieldName(step) + ' to "' + trunc(step.value, 30) + '"';
+        if (step.value === 'true') return 'Tick ' + fieldName(step);
+        if (step.value === 'false') return 'Untick ' + fieldName(step);
+        return 'Set ' + fieldName(step) + ' to "' + trunc(step.value, 24) + '"';
       case 'key':
-        return 'Pressed ' + (step.value || 'a key');
+        return 'Press ' + (step.value || 'a key');
       case 'scroll':
-        return 'Scrolled the page to ' + (step.value || '0') + 'px';
+        return 'Scroll the page';
       case 'switchTab':
-        return 'Switched to tab: ' + trunc(step.title || hostOf(step.url), 46);
+        return 'Go to tab "' + trunc(step.title || hostOf(step.url), 34) + '"';
       case 'screenshot':
-        return 'Screenshot of ' + trunc(step.title || hostOf(step.url), 40);
+        return 'Take a picture';
       default:
         return step.type;
     }
+  }
+
+  function detailOf(step) {
+    var a = step.attrs || {};
+    switch (step.type) {
+      case 'click':
+        return step.tagName || '';
+      case 'input':
+        if (a.type === 'password') return 'password box ' + fieldName(step) + ' — never saved';
+        return step.value ? 'into ' + fieldName(step) : '';
+      case 'key': {
+        var name = squash(step.ariaLabel || a.name || (step.tagName !== 'body' ? step.fallbackText : ''));
+        if (name) return 'in ' + (step.tagName || 'field') + " '" + trunc(name, 30) + "'";
+        return step.tagName && step.tagName !== 'body' ? 'in ' + step.tagName : '';
+      }
+      case 'scroll':
+        return 'to ' + (step.value || '0') + ' px down';
+      case 'switchTab':
+        return hostOf(step.url);
+      case 'screenshot':
+        return 'of ' + trunc(step.title || hostOf(step.url), 34);
+      default:
+        return '';
+    }
+  }
+
+  /* Plain-English description of one recorded step, for notices. */
+  function describe(step) {
+    var d = detailOf(step);
+    return titleOf(step) + (d ? ' ' + d : '');
   }
 
   /* --------------------------------------------------- repeat pattern logic */
@@ -232,10 +270,6 @@
     ask({ cmd: 'analyzePattern', pattern: basePattern, text: text, prefix: prefix })
       .then(function (res) {
       if (!res || res.ok === false) return;
-      /* Exact wording first. Where the wording carries the row's own name, the
-       * leading words still say which state it is in, so fall back to those.
-       * Either way it takes two or more elements to be a state rather than a
-       * single row - pinning to one would leave the loop with nothing to do. */
       var pin = null;
       if (res.withText >= 2) pin = ':text("' + quote(text) + '")';
       else if (prefix && prefix !== text && res.withPrefix >= 2) {
@@ -250,13 +284,11 @@
       var pinned = basePattern + pin;
       step.repeat = Object.assign({}, step.repeat, { pattern: pinned });
       saveRepeat(stepId, step.repeat);
-      /* The box has to show what is actually going to run - a re-render is
-       * skipped here because only a field value changed, so update it directly. */
-      var box = el.list.querySelector('[data-fkey="' + stepId + ':pattern"]');
+      var box = el.drawer.querySelector('[data-fkey="' + stepId + ':pattern"]');
       if (box && box !== document.activeElement) box.value = pinned;
       refreshCount(stepId, pinned);
       if (others > 0) {
-        showLocalNotice('Narrowed the match pattern for step "' + trunc(describe(step), 40) +
+        showLocalNotice('Narrowed the match pattern for "' + trunc(titleOf(step), 40) +
           '" to elements showing "' + shown + '". The page has ' + others +
           ' other element(s) with the same attribute in a different state, and clicking those ' +
           'would do something else entirely.', 'warn');
@@ -279,33 +311,31 @@
     return v === 'skip' || v === 'dismiss' ? v : 'stop';
   }
 
+  function isLooping(step) {
+    return !!(step && step.repeat && step.repeat.enabled);
+  }
+
   function setSizeOf(step) {
     if (step && step.set && step.set.size > 0) return Math.round(step.set.size);
     if (step && step.repeat && step.repeat.groupSize > 0) return Math.round(step.repeat.groupSize);
     return 1;
   }
 
-  function setNameOf(step, index) {
-    if (step && step.set && squash(step.set.name)) return step.set.name;
-    var size = Math.min(setSizeOf(step), steps.length - index);
-    var last = steps[index + size - 1];
-    var head = describe(step).replace(/^Clicked \w+ /, '').replace(/^'|'$/g, '');
-    if (size < 2 || !last) return trunc(head, 30);
-    var tail = describe(last).replace(/^Clicked \w+ /, '').replace(/^'|'$/g, '');
-    return trunc(head, 22) + ' → ' + trunc(tail, 22);
+  function shortTitle(step) {
+    return titleOf(step).replace(/^(Click|Press|Type|Tick|Untick|Set|Clear) /, '').replace(/^["']|["']$/g, '');
   }
 
-  /* A set is anchored on its first step; the ones it covers are drawn inside
-   * it rather than as rows of their own. */
-  function setMemberIds() {
-    var inside = {};
-    for (var i = 0; i < steps.length; i++) {
-      var size = Math.min(setSizeOf(steps[i]), steps.length - i);
-      if (size < 2) continue;
-      for (var j = i + 1; j < i + size; j++) inside[steps[j].id] = steps[i].id;
-      i += size - 1;
-    }
-    return inside;
+  function setNameOf(unit) {
+    var first = unit.steps[0];
+    if (first.set && squash(first.set.name)) return first.set.name;
+    if (unit.steps.length < 2) return trunc(shortTitle(first), 30);
+    var last = unit.steps[unit.steps.length - 1];
+    return trunc(shortTitle(first), 20) + ' → ' + trunc(shortTitle(last), 20);
+  }
+
+  function stepById(id) {
+    for (var i = 0; i < steps.length; i++) if (steps[i].id === id) return steps[i];
+    return null;
   }
 
   function stepIndexById(id) {
@@ -313,10 +343,198 @@
     return -1;
   }
 
+  /* -------------------------------------------------------- the flow model */
+
+  /* The flow as the canvas draws it: a list of units, each a single step or
+   * a block (a set, or a lone looping click). Every rearrangement is made on
+   * this shape and flattened back, so a set's size can never drift from what
+   * is on screen. */
+  function toUnits(list) {
+    var units = [];
+    for (var i = 0; i < list.length; i++) {
+      var step = list[i];
+      var size = Math.min(setSizeOf(step), list.length - i);
+      if (size > 1 || isLooping(step)) {
+        units.push({ block: true, steps: list.slice(i, i + size) });
+        i += size - 1;
+      } else {
+        units.push({ block: false, steps: [step] });
+      }
+    }
+    return units;
+  }
+
+  /* Back to the stored shape. The first step of a block carries the set; the
+   * others carry none, and a loop on one of them is switched off, because a
+   * block cannot repeat inside another. */
+  function flatten(units) {
+    var out = [];
+    units.forEach(function (u) {
+      var n = u.steps.length;
+      u.steps.forEach(function (s, k) {
+        var copy = Object.assign({}, s);
+        if (k === 0) {
+          copy.set = n >= 2 ? Object.assign({ name: '', collapsed: false }, s.set || {}, { size: n }) : null;
+          if (copy.repeat && copy.repeat.groupSize != null) {
+            copy.repeat = Object.assign({}, copy.repeat, { groupSize: n });
+          }
+        } else {
+          copy.set = null;
+          if (isLooping(copy)) copy.repeat = Object.assign({}, copy.repeat, { enabled: false });
+        }
+        out.push(copy);
+      });
+    });
+    return out;
+  }
+
+  function locate(units, id) {
+    for (var u = 0; u < units.length; u++) {
+      for (var k = 0; k < units[u].steps.length; k++) {
+        if (units[u].steps[k].id === id) return { u: u, k: k, unit: units[u] };
+      }
+    }
+    return null;
+  }
+
+  function cloneUnits(units) {
+    return units.map(function (x) { return { block: x.block, steps: x.steps.slice() }; });
+  }
+
+  /* Lift a step, or a whole block, out of the flow. Says which unit went
+   * away (if one did) and where the step came from, so a drop target that
+   * was worked out before the lift can be adjusted after it. */
+  function detach(units, d) {
+    var loc = locate(units, d.id);
+    if (!loc) return null;
+    var copy = cloneUnits(units);
+    var unit = copy[loc.u];
+    var moved;
+    var removedUnit = -1;
+    if (d.kind === 'block') {
+      moved = unit.steps.slice();
+      copy.splice(loc.u, 1);
+      removedUnit = loc.u;
+    } else {
+      moved = unit.steps.splice(loc.k, 1);
+      if (!unit.steps.length) {
+        copy.splice(loc.u, 1);
+        removedUnit = loc.u;
+      } else if (unit.steps.length === 1 && !isLooping(unit.steps[0])) {
+        unit.block = false;
+      }
+    }
+    return { units: copy, moved: moved, removedUnit: removedUnit, from: { u: loc.u, k: loc.k } };
+  }
+
+  function adjustTarget(target, det) {
+    var t = { kind: target.kind, u: target.u, k: target.k };
+    if (det.removedUnit >= 0) {
+      if (t.u > det.removedUnit) t.u -= 1;
+      else if (t.u === det.removedUnit && t.kind !== 'gap') return null;   /* onto itself */
+    } else if (t.u === det.from.u && t.kind !== 'gap' && t.k >= 0 && t.k > det.from.k) {
+      t.k -= 1;
+    }
+    return t;
+  }
+
+  /* Put lifted steps down: in a gap between units, inside a block at a
+   * position, or onto a card (which makes a block of the two). */
+  function insertMoved(units, moved, t) {
+    if (t.kind === 'gap') {
+      var at = Math.max(0, Math.min(t.u, units.length));
+      units.splice(at, 0, { block: moved.length > 1 || isLooping(moved[0]), steps: moved });
+      return units;
+    }
+    var unit = units[t.u];
+    if (!unit) return null;
+    if (moved.length > 1) return null;                 /* a block never nests */
+    if (t.kind === 'in') {
+      unit.block = true;
+      var pos = t.k < 0 || t.k > unit.steps.length ? unit.steps.length : t.k;
+      unit.steps.splice(pos, 0, moved[0]);
+      return units;
+    }
+    /* onto a card */
+    if (unit.block) {
+      unit.steps.splice(Math.min(t.k, unit.steps.length - 1) + 1, 0, moved[0]);
+    } else {
+      units[t.u] = { block: true, steps: [unit.steps[0], moved[0]] };
+    }
+    return units;
+  }
+
+  function sameFlow(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id !== b[i].id) return false;
+      if (setSizeOf(a[i]) !== setSizeOf(b[i])) return false;
+      if (isLooping(a[i]) !== isLooping(b[i])) return false;
+    }
+    return true;
+  }
+
+  /* One whole-list write for any rearrangement, with an Undo. */
+  function commitSteps(next, text) {
+    if (sameFlow(next, steps)) return Promise.resolve(null);
+    var switchedOff = next.filter(function (s) {
+      var was = stepById(s.id);
+      return was && isLooping(was) && !isLooping(s);
+    });
+    if (switchedOff.length) {
+      text += ' The repeat on “' + trunc(titleOf(switchedOff[0]), 30) +
+              '” was switched off: a block cannot repeat inside another, and a repeat block ' +
+              'has to start with the step that repeats.';
+    }
+    undoSnapshot = {
+      steps: steps.slice(),
+      loadedFrom: loadedFrom,
+      text: text,
+      undoNote: 'Put the steps back as they were.'
+    };
+    /* The background writes no notice for this; the one with the Undo on it
+     * is put up here once the write has landed. */
+    return actAndReport({ cmd: 'setSteps', steps: next }).then(function (res) {
+      if (res && res.ok !== false) showUndo();
+      else undoSnapshot = null;
+      return res;
+    });
+  }
+
+  function moveText(d, target, det) {
+    var what = d.kind === 'block' ? 'the block' : '“' + trunc(titleOf(det.moved[0]), 36) + '”';
+    if (target.kind === 'onto') return 'Put ' + what + ' together with another step in a block.';
+    if (target.kind === 'in') return 'Moved ' + what + ' into the block.';
+    if (d.kind !== 'block' && det.from && units0Block(det, d)) return 'Took ' + what + ' out of the block.';
+    return 'Moved ' + what + '.';
+  }
+
+  function units0Block(det, d) {
+    var before = toUnits(steps);
+    var loc = locate(before, d.id);
+    return !!(loc && loc.unit.block && loc.unit.steps.length > 1);
+  }
+
+  /* The one path every drag and every "move" button goes through. */
+  function performMove(d, target) {
+    if (mode !== 'idle') return;
+    var units = toUnits(steps);
+    var det = detach(units, d);
+    if (!det) return;
+    if (d.kind === 'block' && target.kind !== 'gap') {
+      showLocalNotice('A block cannot go inside another block. Drop it between steps instead.', 'warn');
+      return;
+    }
+    var t = adjustTarget(target, det);
+    if (!t) return;
+    var out = insertMoved(det.units, det.moved, t);
+    if (!out) return;
+    commitSteps(flatten(out), moveText(d, target, det));
+  }
+
   /* ----------------------------------------------------------- status line */
 
   function renderStatus() {
-    var cls = 'status status-' + mode;
     var detail = '';
     el.statusMode.textContent =
       mode === 'recording' ? 'Recording'
@@ -327,23 +545,23 @@
         : 'Idle';
 
     if (mode === 'nextpage') {
-      detail = 'waiting for you to click the next-page button';
+      detail = 'Waiting for you to click the next-page button.';
     } else if (mode === 'dismiss') {
-      detail = 'waiting for you to click the button that closes the pop-up';
+      detail = 'Waiting for you to click the button that closes the pop-up.';
     } else if (mode === 'redo') {
       var at = redoingId ? stepIndexById(redoingId) : -1;
-      detail = at >= 0 ? 'replacing step ' + (at + 1) : 'replacing one step';
+      detail = at >= 0 ? 'Replacing step ' + (at + 1) + '.' : 'Replacing one step.';
     } else if (mode === 'recording') {
-      detail = steps.length + ' step' + (steps.length === 1 ? '' : 's') + ' captured';
+      detail = steps.length + ' step' + (steps.length === 1 ? '' : 's') + ' captured so far.';
     } else if (mode === 'playing' && play) {
       detail = 'Step ' + ((play.index || 0) + 1) + ' of ' + (play.total || steps.length);
       if (play.label) detail += ' — ' + play.label;
       if (play.matchLevel) detail += ' (' + play.matchLevel + ')';
     } else {
-      detail = steps.length ? steps.length + ' step' + (steps.length === 1 ? '' : 's') + ' ready' : 'Nothing recorded';
+      detail = steps.length ? steps.length + ' step' + (steps.length === 1 ? '' : 's') + ' in the flow.' : 'Nothing recorded yet.';
     }
     el.statusDetail.textContent = detail;
-    el.statusLine.className = cls;
+    el.statusLine.className = 'status status-' + mode;
 
     if (mode === 'playing' && play && play.repeatMax) {
       var line = 'Repeat ' + (play.repeatCount || 0) + ' of up to ' + play.repeatMax;
@@ -358,9 +576,7 @@
     }
   }
 
-  /* Only the buttons that can actually be pressed right now are on screen.
-   * Six buttons with four of them greyed out is a puzzle to solve before you
-   * can start; two live ones is an instruction. */
+  /* Only the buttons that can actually be pressed right now are on screen. */
   function renderButtons() {
     var idle = mode === 'idle';
     var recording = mode === 'recording';
@@ -381,26 +597,22 @@
     el.btnStopPlay.hidden = !playing;
     el.btnClear.hidden = !idle || !have;
 
-    if (mode !== 'idle') { disarmClear(); selected = {}; }
+    if (mode !== 'idle') disarmClear();
     renderGuide();
   }
 
   /* One line saying what to do next, rather than a block of description to
-   * read before anything happens. It is the only place in the panel that
-   * gives instructions, so there is never a second one to reconcile it with. */
+   * read before anything happens. */
   function renderGuide() {
     var g = el.guide;
-    if (!g) return;
     g.textContent = '';
-    var looping = steps.some(function (s) { return s.repeat && s.repeat.enabled; });
+    var looping = steps.some(isLooping);
     if (mode === 'playing' || mode === 'redo' || mode === 'nextpage' || mode === 'dismiss') {
       return;                 /* the status header, or the yellow bar, says it */
     }
     if (mode === 'recording') {
-      g.textContent = 'Recording. Go and do the job once on the page — then press ' +
-                      '"Stop recording".';
+      g.textContent = 'Recording. Go and do the job once on the page, then press "Stop recording".';
     } else if (!steps.length) {
-      g.textContent = '';
       ['Press Record.', 'Do the job once on the page.', 'Press "Stop recording".']
         .forEach(function (line, i) {
           var row = document.createElement('span');
@@ -412,12 +624,22 @@
           row.appendChild(document.createTextNode(line));
           g.appendChild(row);
         });
-      return;
     } else if (looping) {
-      g.textContent = 'Ready. Press Play and it will do this to every match on the page.';
+      g.textContent = 'Ready. Press Play — the repeat block runs on every match on the page.';
     } else {
-      g.textContent = 'Ready. Press Play to do these steps once.';
+      g.textContent = 'Ready. Press Play to run these steps once.';
     }
+  }
+
+  function renderFlowHint() {
+    var show = mode === 'idle' && steps.length >= 2;
+    el.flowHint.hidden = !show;
+    if (!show) return;
+    var hasBlock = toUnits(steps).some(function (u) { return u.block && u.steps.length > 1; });
+    el.flowHint.textContent = hasBlock
+      ? 'Click a card or a block to change it. Drag cards to reorder them, into a block, or out of one.'
+      : 'Click a card to change it. Drag a card to reorder it, or drop it onto another card to make a ' +
+        'block that runs as one thing.';
   }
 
   /* --------------------------------------------------------------- notices */
@@ -429,8 +651,6 @@
     el.notice.textContent = n.text;
   }
 
-  /* Held on to because whether this is worth showing depends on the mode, and
-   * a mode change arrives on its own without the list. */
   var skippedTabs = null;
 
   function renderSkipped(list) {
@@ -480,12 +700,12 @@
     el.sizeWarn.className = 'notice notice-warn';
     var savedShare = totalBytes != null && totalBytes - recordingBytes > 512 * 1024;
     el.sizeWarn.textContent = savedShare
-      ? 'The saved recordings and the current steps take about ' + megabytes(total) + ' together, ' +
-        'mostly screenshots. Chrome limits extension storage to roughly 10 MB, so delete a saved ' +
-        'recording or some screenshot steps before saving more, or the next save may fail.'
-      : 'This recording is about ' + megabytes(recordingBytes) + ', mostly screenshots. ' +
-        'Chrome limits extension storage to roughly 10 MB, so delete some screenshot steps ' +
-        'before adding more or the recording may fail to save.';
+      ? 'The saved recordings and the current flow take about ' + megabytes(total) + ' together, ' +
+        'mostly pictures. Chrome limits extension storage to roughly 10 MB, so delete a saved ' +
+        'recording or some picture steps before saving more, or the next save may fail.'
+      : 'This flow is about ' + megabytes(recordingBytes) + ', mostly pictures. ' +
+        'Chrome limits extension storage to roughly 10 MB, so delete some picture steps ' +
+        'before adding more or the flow may fail to save.';
   }
 
   function renderStorageUse(used) {
@@ -497,22 +717,361 @@
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
-  /* ------------------------------------------------------------ step list */
+  /* ----------------------------------------------------------------- icons */
+
+  var ICONS = {
+    click: '<path d="M5 3l14 8-6 2-3 6z"/>',
+    input: '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 11h1M11 11h1M15 11h1M8 14h8"/>',
+    change: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 12l3 3 5-6"/>',
+    key: '<path d="M20 5v6a2 2 0 0 1-2 2H6"/><path d="M9 9l-4 4 4 4"/>',
+    scroll: '<path d="M12 4v16M8 8l4-4 4 4M8 16l4 4 4-4"/>',
+    switchTab: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M7 7h.01"/>',
+    screenshot: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3"/>',
+    repeat: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+    group: '<path d="M4 7h16M4 12h16M4 17h10"/>'
+  };
+
+  function tile(kind) {
+    var t = document.createElement('span');
+    t.className = 'tile tile-' + kind;
+    t.setAttribute('aria-hidden', 'true');
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.innerHTML = ICONS[kind] || ICONS.click;
+    t.appendChild(svg);
+    return t;
+  }
+
+  /* -------------------------------------------------------------- the flow */
 
   function renderKey() {
     return (redoingId || '') + '#' + steps.map(function (s) {
-      return s.id + ':' + s.type + ':' + (s.repeat && s.repeat.enabled ? '1' : '0') +
+      return s.id + ':' + s.type + ':' + (isLooping(s) ? '1' : '0') +
              ':' + setSizeOf(s) + ':' + (s.set && s.set.collapsed ? 'c' : 'o') +
-             /* The next-page control belongs here too: setting or removing one
-              * changes nothing else about the step, so without it the card
-              * would go on saying the loop stops when it no longer does. */
-             ':' + (s.repeat && s.repeat.nextPage ? 'n' + (s.repeat.nextPage.selector || '?') : '') +
-             /* So do the missing-step choice and its recorded close button:
-              * the row grows a hint and buttons when the choice changes. */
+             ':' + (s.repeat && s.repeat.nextPage ? 'n' : '') +
              ':' + (s.repeat ? String(s.repeat.onMissing || '') : '') +
-             ':' + (s.repeat && s.repeat.dismiss ? 'd' + (s.repeat.dismiss.selector || '?') : '') +
-             ':' + (selected[s.id] ? 's' : '');
+             ':' + (s.repeat && s.repeat.dismiss ? 'd' : '') +
+             ':' + (s.type === 'screenshot' && s.dataUrl ? 'p' : '');
     }).join('|') + '#' + mode;
+  }
+
+  /* The tab is only worth naming when it changes: repeating it on every card
+   * is the single biggest source of clutter in a long recording. */
+  function tabChanged(index) {
+    if (index <= 0) return true;
+    var prev = steps[index - 1];
+    var here = steps[index];
+    if (!prev || !here) return true;
+    return (prev.title || prev.url) !== (here.title || here.url);
+  }
+
+  function pageMark(step) {
+    var mark = document.createElement('div');
+    mark.className = 'page-mark';
+    var text = document.createElement('span');
+    text.textContent = 'on ' + tabName(step);
+    text.title = step.url || '';
+    mark.appendChild(text);
+    return mark;
+  }
+
+  function gap(attrs, cls) {
+    var g = document.createElement('div');
+    g.className = 'gap' + (cls ? ' ' + cls : '');
+    Object.keys(attrs).forEach(function (k) { g.dataset[k] = String(attrs[k]); });
+    return g;
+  }
+
+  function buildCard(step, index, u, k, inBlock) {
+    var card = document.createElement('div');
+    card.className = 'card type-' + step.type;
+    card.dataset.id = step.id;
+    card.dataset.index = String(index);
+    card.dataset.unit = String(u);
+    card.dataset.k = String(k);
+    card.dataset.dragKind = 'step';
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', 'Step ' + (index + 1) + ': ' + describe(step));
+    if (mode === 'idle') card.draggable = true;
+    if (mode === 'playing' && play && play.index === index) card.classList.add('current');
+    if (mode === 'redo' && redoingId === step.id) card.classList.add('redoing');
+    if (selection && selection.id === step.id && (selection.view === 'step' || !inBlock)) card.classList.add('selected');
+
+    var num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = String(index + 1);
+    card.appendChild(num);
+
+    card.appendChild(tile(step.type));
+
+    var text = document.createElement('span');
+    text.className = 'card-text';
+    var title = document.createElement('span');
+    title.className = 'card-title';
+    title.textContent = titleOf(step);
+    title.title = describe(step);
+    text.appendChild(title);
+    var sub = document.createElement('span');
+    sub.className = 'card-sub';
+    sub.textContent = detailOf(step);
+    text.appendChild(sub);
+    card.appendChild(text);
+
+    if (mode === 'idle') {
+      var more = document.createElement('span');
+      more.className = 'card-more';
+      more.setAttribute('aria-hidden', 'true');
+      more.textContent = '›';
+      card.appendChild(more);
+      var grip = document.createElement('span');
+      grip.className = 'grip';
+      grip.title = 'Drag to move this step';
+      grip.setAttribute('aria-hidden', 'true');
+      grip.textContent = '⋮⋮';
+      card.appendChild(grip);
+    }
+
+    if (step.type === 'screenshot' && step.dataUrl) {
+      card.classList.add('card-shot');
+      var wrap = document.createElement('span');
+      wrap.className = 'thumb-wrap';
+      var img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = step.dataUrl;
+      img.alt = 'Picture taken on ' + tabName(step);
+      wrap.appendChild(img);
+      card.appendChild(wrap);
+    }
+    return card;
+  }
+
+  function buildBlock(unit, u, startIndex) {
+    var anchor = unit.steps[0];
+    var looping = isLooping(anchor);
+    var size = unit.steps.length;
+    var collapsed = size >= 2 && !!(anchor.set && anchor.set.collapsed);
+    var lastId = unit.steps[size - 1].id;
+
+    var block = document.createElement('div');
+    block.className = 'block' + (looping ? ' looping' : '');
+    block.dataset.id = anchor.id;
+    block.dataset.unit = String(u);
+    if (selection && selection.id === anchor.id && selection.view === 'block') block.classList.add('selected');
+
+    var head = document.createElement('div');
+    head.className = 'block-head';
+    head.dataset.id = anchor.id;
+    head.dataset.unit = String(u);
+    head.dataset.last = lastId;
+    head.dataset.dragKind = 'block';
+    head.tabIndex = 0;
+    head.setAttribute('role', 'button');
+    if (mode === 'idle') head.draggable = true;
+
+    head.appendChild(tile(looping ? 'repeat' : 'group'));
+
+    var text = document.createElement('span');
+    text.className = 'card-text';
+    var title = document.createElement('span');
+    title.className = 'block-title';
+    title.textContent = looping ? 'Repeat for each match' : 'Group';
+    text.appendChild(title);
+    var sub = document.createElement('span');
+    sub.className = 'card-sub';
+    sub.textContent = setNameOf(unit) + ' · ' + size + ' step' + (size === 1 ? '' : 's');
+    text.appendChild(sub);
+    head.appendChild(text);
+
+    if (looping) {
+      var chip = document.createElement('span');
+      chip.className = 'count-chip';
+      chip.dataset.countFor = anchor.id;
+      var known = readouts[anchor.id];
+      chip.textContent = known ? known.chip : '…';
+      if (known && known.kind) chip.classList.add(known.kind);
+      chip.title = 'How many elements the repeat would act on, on the page in the active tab';
+      head.appendChild(chip);
+    }
+
+    if (size >= 2) {
+      var chev = document.createElement('button');
+      chev.type = 'button';
+      chev.className = 'chev';
+      chev.dataset.role = 'collapse';
+      chev.dataset.id = anchor.id;
+      chev.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      chev.title = collapsed ? 'Show the steps in this block' : 'Hide the steps in this block';
+      chev.textContent = collapsed ? '▸' : '▾';
+      head.appendChild(chev);
+    }
+
+    if (mode === 'idle') {
+      var grip = document.createElement('span');
+      grip.className = 'grip';
+      grip.title = 'Drag to move the whole block';
+      grip.setAttribute('aria-hidden', 'true');
+      grip.textContent = '⋮⋮';
+      head.appendChild(grip);
+    }
+    block.appendChild(head);
+
+    if (collapsed) {
+      var note = document.createElement('div');
+      note.className = 'block-collapsed-note';
+      note.textContent = size + ' steps hidden — press ▸ to show them.';
+      block.appendChild(note);
+    } else {
+      var body = document.createElement('div');
+      body.className = 'block-body';
+      unit.steps.forEach(function (s, k) {
+        body.appendChild(gap({ blockUnit: u, k: k }, k === 0 ? 'gap-first' : ''));
+        body.appendChild(buildCard(s, startIndex + k, u, k, true));
+      });
+      body.appendChild(gap({ blockUnit: u, k: size }, 'gap-last'));
+      block.appendChild(body);
+    }
+
+    var drop = document.createElement('div');
+    drop.className = 'block-drop';
+    drop.dataset.unit = String(u);
+    drop.textContent = 'Drop a step here to add it to this block';
+    block.appendChild(drop);
+    return block;
+  }
+
+  function renderFlow(force) {
+    /* Not a rendering concern, and it must not be skipped by the no-change
+     * shortcut below: a re-recorded step keeps the same shape, so the key can
+     * be identical while the loop is still waiting for a usable pattern. */
+    fulfilPendingPatterns();
+
+    var key = renderKey();
+    if (!force && key === lastRenderKey) {
+      highlightCurrent();
+      markSelected();
+      renderDrawer();
+      return;
+    }
+    lastRenderKey = key;
+
+    el.flow.textContent = '';
+    var units = toUnits(steps);
+    var index = 0;
+    units.forEach(function (unit, u) {
+      el.flow.appendChild(gap({ gap: u }, u === 0 ? 'gap-first' : ''));
+      if (tabChanged(index) && unit.steps[0].type !== 'switchTab') el.flow.appendChild(pageMark(unit.steps[0]));
+      if (unit.block) el.flow.appendChild(buildBlock(unit, u, index));
+      else el.flow.appendChild(buildCard(unit.steps[0], index, u, 0, false));
+      index += unit.steps.length;
+    });
+    if (units.length) el.flow.appendChild(gap({ gap: units.length }, 'gap-last'));
+
+    el.empty.hidden = steps.length > 0;
+    el.count.textContent = String(steps.length);
+    renderFlowHint();
+    renderRedoBar();
+    renderDrawer();
+
+    /* While recording, the step that just happened is the one worth seeing;
+     * otherwise the list quietly fills up out of sight. */
+    if (mode === 'recording') {
+      var cards = el.flow.querySelectorAll('.card');
+      if (cards.length) cards[cards.length - 1].scrollIntoView({ block: 'nearest' });
+    }
+
+    if (mode !== 'playing') {
+      steps.forEach(function (step) {
+        if (isLooping(step)) refreshCount(step.id, step.repeat.pattern);
+      });
+    }
+  }
+
+  function highlightCurrent() {
+    var cards = el.flow.querySelectorAll('.card');
+    for (var i = 0; i < cards.length; i++) {
+      var idx = Number(cards[i].dataset.index);
+      cards[i].classList.toggle('current', mode === 'playing' && !!play && play.index === idx);
+    }
+    el.count.textContent = String(steps.length);
+  }
+
+  function markSelected() {
+    var nodes = el.flow.querySelectorAll('.card, .block');
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      var isBlock = n.classList.contains('block');
+      var on = !!selection && selection.id === n.dataset.id &&
+               (isBlock ? selection.view === 'block'
+                        : (selection.view === 'step' || !n.closest('.block')));
+      n.classList.toggle('selected', on);
+    }
+  }
+
+  /* ------------------------------------------------- live "matches N" line */
+
+  function sentence(text) {
+    var t = squash(text);
+    return /[.!?]$/.test(t) ? t : t + '.';
+  }
+
+  function setReadout(stepId, text, kind, chipText) {
+    readouts[stepId] = { text: text, kind: kind || '', chip: chipText || '…' };
+    var node = el.drawer.querySelector('[data-readout-for="' + stepId + '"]');
+    if (node) {
+      node.className = 'readout' + (kind ? ' readout-' + kind : '');
+      node.textContent = text;
+    }
+    var chip = el.flow.querySelector('[data-count-for="' + stepId + '"]');
+    if (chip) {
+      chip.className = 'count-chip' + (kind ? ' ' + kind : '');
+      chip.textContent = chipText || '…';
+    }
+  }
+
+  function refreshCount(stepId, pattern) {
+    if (countTimers[stepId]) clearTimeout(countTimers[stepId]);
+    countTimers[stepId] = setTimeout(function () {
+      delete countTimers[stepId];
+      if (!String(pattern || '').trim()) {
+        setReadout(stepId, 'Enter a match pattern to see how many elements it finds.', 'error', 'no pattern');
+        return;
+      }
+      ask({ cmd: 'countMatches', pattern: pattern }).then(function (res) {
+        if (!res || res.ok === false) {
+          setReadout(stepId, sentence('Cannot count right now — ' +
+            ((res && res.error) || 'no answer from the page')), 'error', 'no page');
+          return;
+        }
+        var n = res.count;
+        setReadout(
+          stepId,
+          'Found ' + n + ' match' + (n === 1 ? '' : 'es') + ' on this page' +
+            (res.tabTitle ? ' (' + trunc(res.tabTitle, 30) + ')' : '') + '.',
+          n === 0 ? 'none' : '',
+          n + ' match' + (n === 1 ? '' : 'es')
+        );
+      });
+    }, COUNT_DEBOUNCE_MS);
+  }
+
+  /* ---------------------------------------------------------------- drawer */
+
+  function openDrawer(id, view) {
+    if (mode !== 'idle') return;
+    selection = { id: id, view: view };
+    markSelected();
+    renderDrawer();
+    var node = el.flow.querySelector(view === 'block' ? '.block[data-id="' + id + '"]' : '.card[data-id="' + id + '"]');
+    if (node) node.scrollIntoView({ block: 'nearest' });
+  }
+
+  function closeDrawer() {
+    selection = null;
+    el.drawer.hidden = true;
+    el.drawer.textContent = '';
+    document.body.classList.remove('drawer-open');
+    markSelected();
   }
 
   function captureFocus() {
@@ -525,12 +1084,402 @@
 
   function restoreFocus(snap) {
     if (!snap) return;
-    var target = el.list.querySelector('[data-fkey="' + snap.key.replace(/"/g, '\\"') + '"]');
+    var target = el.drawer.querySelector('[data-fkey="' + snap.key.replace(/"/g, '\\"') + '"]');
     if (!target) return;
     target.focus();
     if (snap.start != null) {
       try { target.setSelectionRange(snap.start, snap.end); } catch (e) { /* not supported */ }
     }
+  }
+
+  function renderDrawer() {
+    if (!selection || mode !== 'idle') {
+      if (!el.drawer.hidden) closeDrawer();
+      return;
+    }
+    var units = toUnits(steps);
+    var loc = locate(units, selection.id);
+    if (!loc) { closeDrawer(); return; }
+    /* A step that stopped being a block, or became one, changes which view
+     * makes sense; follow it rather than show an empty drawer. */
+    var view = selection.view;
+    if (view === 'block' && !(loc.unit.block && loc.k === 0)) view = 'step';
+    selection.view = view;
+
+    var snap = captureFocus();
+    var scrollTop = el.drawer.scrollTop;
+    el.drawer.hidden = false;
+    document.body.classList.add('drawer-open');
+    el.drawer.textContent = '';
+    if (view === 'block') buildBlockDrawer(loc, units);
+    else buildStepDrawer(loc, units);
+    el.drawer.scrollTop = scrollTop;
+    restoreFocus(snap);
+  }
+
+  function drawerHead(kind, title, sub) {
+    var head = document.createElement('div');
+    head.className = 'drawer-head';
+    head.appendChild(tile(kind));
+    var text = document.createElement('div');
+    text.className = 'drawer-text';
+    var t = document.createElement('div');
+    t.className = 'drawer-title';
+    t.textContent = title;
+    t.title = title;
+    text.appendChild(t);
+    var s = document.createElement('div');
+    s.className = 'drawer-sub';
+    s.textContent = sub;
+    text.appendChild(s);
+    head.appendChild(text);
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'drawer-close';
+    close.dataset.role = 'close';
+    close.title = 'Close';
+    close.setAttribute('aria-label', 'Close');
+    close.textContent = '×';
+    head.appendChild(close);
+    return head;
+  }
+
+  function section(labelText) {
+    var s = document.createElement('div');
+    s.className = 'drawer-section';
+    if (labelText) {
+      var label = document.createElement('p');
+      label.className = 'drawer-label';
+      label.textContent = labelText;
+      s.appendChild(label);
+    }
+    return s;
+  }
+
+  function actionButton(role, id, glyph, text, opts) {
+    opts = opts || {};
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'action-btn' + (opts.wide ? ' wide' : '') + (opts.danger ? ' danger' : '');
+    b.dataset.role = role;
+    if (id) b.dataset.id = id;
+    if (opts.extra) Object.keys(opts.extra).forEach(function (k) { b.dataset[k] = opts.extra[k]; });
+    if (opts.title) b.title = opts.title;
+    if (opts.disabled) b.disabled = true;
+    var g = document.createElement('span');
+    g.className = 'glyph';
+    g.setAttribute('aria-hidden', 'true');
+    g.textContent = glyph;
+    b.appendChild(g);
+    b.appendChild(document.createTextNode(text));
+    return b;
+  }
+
+  function miniButton(role, id, text, title, danger) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mini-btn' + (danger ? ' danger' : '');
+    b.dataset.role = role;
+    b.dataset.id = id;
+    b.textContent = text;
+    if (title) b.title = title;
+    return b;
+  }
+
+  function switchRow(role, id, on, title, subtitle, disabled) {
+    var row = document.createElement('div');
+    row.className = 'switch-row';
+    var text = document.createElement('div');
+    text.className = 'switch-text';
+    var b = document.createElement('b');
+    b.textContent = title;
+    text.appendChild(b);
+    var s = document.createElement('span');
+    s.textContent = subtitle;
+    text.appendChild(s);
+    row.appendChild(text);
+    var sw = document.createElement('button');
+    sw.type = 'button';
+    sw.className = 'switch';
+    sw.dataset.role = role;
+    sw.dataset.id = id;
+    sw.setAttribute('aria-pressed', on ? 'true' : 'false');
+    sw.setAttribute('aria-label', title);
+    if (disabled) sw.disabled = true;
+    row.appendChild(sw);
+    return row;
+  }
+
+  function facts(pairs) {
+    var dl = document.createElement('dl');
+    dl.className = 'facts';
+    pairs.forEach(function (p) {
+      if (!p[1]) return;
+      var dt = document.createElement('dt');
+      dt.textContent = p[0];
+      var dd = document.createElement('dd');
+      if (p[2] === 'code') {
+        var code = document.createElement('code');
+        code.textContent = p[1];
+        dd.appendChild(code);
+      } else dd.textContent = p[1];
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    });
+    return dl;
+  }
+
+  /* ---- the drawer for one step ---------------------------------------- */
+
+  function buildStepDrawer(loc, units) {
+    var step = loc.unit.steps[loc.k];
+    var index = stepIndexById(step.id);
+    var inBlock = loc.unit.block && loc.unit.steps.length > 1;
+    var d = el.drawer;
+
+    d.appendChild(drawerHead(step.type, titleOf(step),
+      'Step ' + (index + 1) + ' of ' + steps.length + (inBlock ? ' · in a block' : '')));
+
+    var about = section('About this step');
+    var a = step.attrs || {};
+    var pairs = [
+      ['Page', tabName(step)],
+      ['Element', step.type === 'switchTab' || step.type === 'screenshot' || step.type === 'scroll' ? '' :
+        (step.tagName || '') + (step.ariaLabel ? ' labelled "' + trunc(step.ariaLabel, 40) + '"'
+          : step.fallbackText ? ' "' + trunc(step.fallbackText, 40) + '"'
+          : a.name ? ' named "' + trunc(a.name, 30) + '"' : '')],
+      ['Found by', step.selector, 'code'],
+      ['Typed', step.type === 'input' && step.value ? trunc(step.value, 80) : ''],
+      ['Note', step.note || (a.type === 'password' ? 'The password is never saved. At playback the box is focused for you to type it.' : '')]
+    ];
+    about.appendChild(facts(pairs));
+    if (step.type === 'screenshot' && step.dataUrl) {
+      var img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = step.dataUrl;
+      img.alt = 'Picture taken on ' + tabName(step);
+      about.appendChild(img);
+    }
+    d.appendChild(about);
+
+    /* Looping a single click should not require grouping it with anything. */
+    if (step.type === 'click' && !inBlock) {
+      var rep = section('');
+      rep.appendChild(switchRow('loop', step.id, isLooping(step), 'Repeat for each match',
+        'Run this click once for every element like it on the page, scrolling for more as it goes.'));
+      d.appendChild(rep);
+    }
+
+    var arrange = section('Arrange');
+    var grid = document.createElement('div');
+    grid.className = 'action-grid';
+    var u = loc.u;
+    var k = loc.k;
+    var atTop = inBlock ? (k === 0 && u === 0) : u === 0;
+    var atBottom = inBlock ? (k === loc.unit.steps.length - 1 && u === units.length - 1) : u === units.length - 1;
+    grid.appendChild(actionButton('moveup', step.id, '↑', 'Move up', { disabled: atTop }));
+    grid.appendChild(actionButton('movedown', step.id, '↓', 'Move down', { disabled: atBottom }));
+    if (inBlock) {
+      grid.appendChild(actionButton('takeout', step.id, '⇱', 'Take out of the block', { wide: true }));
+    } else {
+      var above = u > 0 ? units[u - 1] : null;
+      var below = u < units.length - 1 ? units[u + 1] : null;
+      grid.appendChild(actionButton('groupabove', step.id, '⤴',
+        above && above.block ? 'Add to the block above' : 'Group with the step above',
+        { disabled: !above }));
+      grid.appendChild(actionButton('groupbelow', step.id, '⤵',
+        below && below.block ? 'Add to the block below' : 'Group with the step below',
+        { disabled: !below }));
+    }
+    arrange.appendChild(grid);
+    d.appendChild(arrange);
+
+    var acts = section('');
+    var grid2 = document.createElement('div');
+    grid2.className = 'action-grid';
+    grid2.appendChild(actionButton('redo', step.id, '↻', 'Re-record this step',
+      { title: 'Do this one action again on the page and replace this step with it' }));
+    grid2.appendChild(actionButton('delete', step.id, '×', 'Delete this step', { danger: true }));
+    acts.appendChild(grid2);
+    d.appendChild(acts);
+  }
+
+  /* ---- the drawer for a block ----------------------------------------- */
+
+  function buildBlockDrawer(loc, units) {
+    var unit = loc.unit;
+    var anchor = unit.steps[0];
+    var looping = isLooping(anchor);
+    var size = unit.steps.length;
+    var first = stepIndexById(anchor.id);
+    var d = el.drawer;
+    var r = anchor.repeat || {};
+
+    d.appendChild(drawerHead(looping ? 'repeat' : 'group',
+      looping ? 'Repeat for each match' : 'Group of ' + size + ' step' + (size === 1 ? '' : 's'),
+      setNameOf(unit) + ' · step' + (size === 1 ? ' ' + (first + 1) : 's ' + (first + 1) + '–' + (first + size))));
+
+    var rep = section('');
+    rep.appendChild(switchRow('loop', anchor.id, looping, 'Repeat for each match',
+      anchor.type === 'click'
+        ? 'Run these steps once for every element like the first one on the page, scrolling for more as it goes.'
+        : 'Repeating needs the block to start with a click - the thing that is on every row.',
+      anchor.type !== 'click'));
+    d.appendChild(rep);
+
+    if (looping) {
+      var how = section('How it repeats');
+
+      var count = document.createElement('div');
+      count.className = 'row';
+      count.appendChild(labelSpan('Repeat up to'));
+      var times = document.createElement('input');
+      times.type = 'number';
+      times.min = '1';
+      times.max = String(MAX_REPEATS_CEILING);
+      times.step = '1';
+      times.className = 'field-inline';
+      times.value = String(r.maxRepeats || DEFAULT_MAX_REPEATS);
+      times.dataset.fkey = anchor.id + ':max';
+      times.dataset.role = 'max';
+      times.dataset.id = anchor.id;
+      times.setAttribute('aria-label', 'Repeat up to this many times');
+      count.appendChild(times);
+      count.appendChild(labelSpan('times'));
+      var actions = document.createElement('span');
+      actions.className = 'row-actions';
+      actions.appendChild(miniButton('check', anchor.id, 'Show me on the page',
+        'Outline every element this repeat would act on, without clicking any of them'));
+      count.appendChild(actions);
+      var readout = document.createElement('span');
+      readout.className = 'readout';
+      readout.dataset.readoutFor = anchor.id;
+      var known = readouts[anchor.id];
+      if (known) {
+        readout.textContent = known.text;
+        if (known.kind) readout.className += ' readout-' + known.kind;
+      } else readout.textContent = 'Checking the active tab…';
+      count.appendChild(readout);
+      how.appendChild(count);
+
+      how.appendChild(buildNextPageRow(anchor));
+      how.appendChild(buildMissingRow(anchor));
+      how.appendChild(buildAdvanced(anchor));
+      d.appendChild(how);
+    }
+
+    var members = section('Steps in this block');
+    var grid = document.createElement('div');
+    grid.className = 'action-grid';
+    var u = loc.u;
+    var below = u < units.length - 1 ? units[u + 1] : null;
+    grid.appendChild(actionButton('moveup', anchor.id, '↑', 'Move up', { disabled: u === 0, extra: { kind: 'block' } }));
+    grid.appendChild(actionButton('movedown', anchor.id, '↓', 'Move down', { disabled: u === units.length - 1, extra: { kind: 'block' } }));
+    grid.appendChild(actionButton('grow', anchor.id, '+', 'Add the step below', {
+      disabled: !below || below.block,
+      title: below && below.block ? 'The step below is a block of its own - split it first' : 'Bring the next step into this block'
+    }));
+    grid.appendChild(actionButton('shrink', anchor.id, '−', 'Take the last step out', { disabled: size < 2 }));
+    if (size >= 2) {
+      grid.appendChild(actionButton('collapse', anchor.id, anchor.set && anchor.set.collapsed ? '▾' : '▸',
+        anchor.set && anchor.set.collapsed ? 'Show the steps' : 'Hide the steps'));
+      grid.appendChild(actionButton('ungroup', anchor.id, '⇲', 'Split into single steps'));
+    }
+    grid.appendChild(actionButton('deleteblock', anchor.id, '×',
+      'Delete ' + (size === 1 ? 'this step' : 'these ' + size + ' steps'), { danger: true, wide: true }));
+    members.appendChild(grid);
+    d.appendChild(members);
+  }
+
+  function labelSpan(text) {
+    var s = document.createElement('span');
+    s.className = 'row-label';
+    s.textContent = text;
+    return s;
+  }
+
+  function describeControl(control) {
+    var name = squash(control.fallbackText || control.ariaLabel ||
+                      (control.attrs && control.attrs.name) || control.selector || 'it');
+    return "'" + trunc(name, 30) + "'";
+  }
+
+  /* What to do when this page has nothing left. */
+  function buildNextPageRow(step) {
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.appendChild(labelSpan('At the end of the page:'));
+    var control = step.repeat && step.repeat.nextPage;
+    var actions = document.createElement('span');
+    actions.className = 'row-actions';
+    if (control) {
+      var what = document.createElement('span');
+      what.className = 'row-what';
+      what.textContent = 'go to the next page (clicks ' + describeControl(control) + ')';
+      row.appendChild(what);
+      actions.appendChild(miniButton('nextpage', step.id, 'Change',
+        'Record a different control to press when the page runs out'));
+      actions.appendChild(miniButton('clearnextpage', step.id, 'Remove',
+        'Stop when the page runs out, instead of going on', true));
+    } else {
+      var stops = document.createElement('span');
+      stops.className = 'row-none';
+      stops.textContent = 'it stops.';
+      row.appendChild(stops);
+      actions.appendChild(miniButton('nextpage', step.id, 'Go to the next page instead',
+        'Record the button that shows the next page, and keep going there'));
+    }
+    row.appendChild(actions);
+    return row;
+  }
+
+  /* What to do when a step in the pass cannot be found - which, on a list,
+   * usually means the click brought up a pop-up other than the one recorded. */
+  var MISSING_CHOICES = [
+    ['stop', 'stop and tell me'],
+    ['dismiss', 'close the pop-up and move on to the next one'],
+    ['skip', 'skip that step and carry on with the rest']
+  ];
+
+  function buildMissingRow(step) {
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.appendChild(labelSpan('If a step is missing:'));
+
+    var select = document.createElement('select');
+    select.className = 'select-inline';
+    select.dataset.fkey = step.id + ':missing';
+    select.dataset.role = 'missing';
+    select.dataset.id = step.id;
+    select.setAttribute('aria-label', 'What to do when a step in the pass cannot be found');
+    MISSING_CHOICES.forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      if (pair[0] === onMissingOf(step)) opt.selected = true;
+      select.appendChild(opt);
+    });
+    row.appendChild(select);
+
+    if (onMissingOf(step) === 'dismiss') {
+      var control = step.repeat && step.repeat.dismiss;
+      var how = document.createElement('span');
+      how.className = 'row-hint';
+      how.textContent = control
+        ? 'Closes it by clicking ' + describeControl(control) + ', then Escape or its own Cancel or Close if that fails.'
+        : 'Closes it with Escape, or a Cancel, Close or Dismiss button of its own.';
+      row.appendChild(how);
+      var actions = document.createElement('span');
+      actions.className = 'row-actions';
+      actions.appendChild(miniButton('dismissrec', step.id, control ? 'Change' : 'Record the button to press',
+        'Bring the pop-up up on the page and click the button that closes it; the next click is what gets saved'));
+      if (control) {
+        actions.appendChild(miniButton('cleardismiss', step.id, 'Remove',
+          'Go back to Escape and the pop-up\'s own Cancel or Close button', true));
+      }
+      row.appendChild(actions);
+    }
+    return row;
   }
 
   function makeField(labelText, input) {
@@ -542,8 +1491,6 @@
     wrap.appendChild(input);
     return wrap;
   }
-
-  /* ---- one action set, drawn as a single card ------------------------- */
 
   function buildAdvanced(step) {
     var wrap = document.createElement('details');
@@ -578,9 +1525,6 @@
       'shifts after every click.'));
     wrap.appendChild(hint);
 
-    var twoUp = document.createElement('div');
-    twoUp.className = 'two-up';
-
     var delayInput = document.createElement('input');
     delayInput.type = 'number';
     delayInput.min = String(DELAY_FLOOR_SECONDS);
@@ -589,404 +1533,369 @@
     delayInput.dataset.fkey = step.id + ':delay';
     delayInput.dataset.role = 'delay';
     delayInput.dataset.id = step.id;
-    twoUp.appendChild(makeField('Seconds to wait between clicks', delayInput));
-    wrap.appendChild(twoUp);
+    wrap.appendChild(makeField('Seconds to wait between clicks', delayInput));
 
     var limits = document.createElement('p');
     limits.className = 'hint';
-    limits.textContent = 'Whatever you type, a loop never runs more than ' + MAX_REPEATS_CEILING +
+    limits.textContent = 'Whatever you type, a repeat never runs more than ' + MAX_REPEATS_CEILING +
       ' times or waits less than ' + DELAY_FLOOR_SECONDS + ' seconds between turns. Sites rate-limit ' +
       'rapid automated clicking and some restrict accounts for it.';
     wrap.appendChild(limits);
     return wrap;
   }
 
-  function buildSetCard(step, index, size) {
-    var li = document.createElement('li');
-    var looping = !!(step.repeat && step.repeat.enabled);
-    var collapsed = !!(step.set && step.set.collapsed);
-    li.className = 'set' + (looping ? ' set-looping' : '') + (collapsed ? ' set-collapsed' : '');
-    li.dataset.id = step.id;
+  /* ---- what the drawer's controls do ----------------------------------- */
 
-    /* ---- header ---- */
-    var head = document.createElement('div');
-    head.className = 'set-head';
+  el.drawer.addEventListener('click', function (e) {
+    var target = e.target.closest ? e.target.closest('[data-role]') : null;
+    if (!target || !el.drawer.contains(target)) return;
+    var role = target.dataset.role;
+    var id = target.dataset.id;
 
-    var chev = document.createElement('button');
-    chev.type = 'button';
-    chev.className = 'chev';
-    chev.dataset.role = 'collapse';
-    chev.dataset.id = step.id;
-    chev.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    chev.title = collapsed ? 'Show the steps in this set' : 'Hide the steps in this set';
-    chev.textContent = collapsed ? '▸' : '▾';
-    head.appendChild(chev);
+    if (role === 'close') { closeDrawer(); return; }
 
-    var title = document.createElement('span');
-    title.className = 'set-title';
-    title.textContent = setNameOf(step, index);
-    head.appendChild(title);
-
-    var count = document.createElement('span');
-    count.className = 'set-count';
-    count.textContent = size === 1 ? 'step ' + (index + 1) : size + ' steps';
-    head.appendChild(count);
-
-    var loopBtn = document.createElement('button');
-    loopBtn.type = 'button';
-    loopBtn.className = 'loop-btn' + (looping ? ' on' : '');
-    loopBtn.dataset.role = 'loop';
-    loopBtn.dataset.id = step.id;
-    loopBtn.setAttribute('aria-pressed', looping ? 'true' : 'false');
-    loopBtn.textContent = looping ? '⟳ Repeating' : '⟳ Repeat';
-    loopBtn.title = step.type === 'click'
-      ? 'Do these steps once for every match on the page'
-      : 'Repeating only works when the group starts with a click';
-    if (step.type !== 'click') loopBtn.disabled = true;
-    head.appendChild(loopBtn);
-
-    li.appendChild(head);
-
-    /* ---- looping controls, right under the header where they belong ---- */
-    if (looping) {
-      var bar = document.createElement('div');
-      bar.className = 'loop-bar';
-
-      var label = document.createElement('span');
-      label.textContent = 'Do this up to';
-      bar.appendChild(label);
-
-      var times = document.createElement('input');
-      times.type = 'number';
-      times.min = '1';
-      times.max = String(MAX_REPEATS_CEILING);
-      times.step = '1';
-      times.className = 'loop-times';
-      times.value = String((step.repeat && step.repeat.maxRepeats) || DEFAULT_MAX_REPEATS);
-      times.dataset.fkey = step.id + ':max';
-      times.dataset.role = 'max';
-      times.dataset.id = step.id;
-      bar.appendChild(times);
-
-      var suffix = document.createElement('span');
-      suffix.textContent = 'times';
-      bar.appendChild(suffix);
-
-      var checkBtn = document.createElement('button');
-      checkBtn.type = 'button';
-      checkBtn.className = 'check-btn';
-      checkBtn.dataset.role = 'check';
-      checkBtn.dataset.id = step.id;
-      checkBtn.textContent = 'Show me on the page';
-      checkBtn.title = 'Outline every element this loop would act on, without clicking any of them';
-      bar.appendChild(checkBtn);
-
-      li.appendChild(bar);
-
-      var readout = document.createElement('div');
-      readout.className = 'readout';
-      readout.dataset.readoutFor = step.id;
-      readout.textContent = 'Checking the active tab…';
-      li.appendChild(readout);
-
-      li.appendChild(buildNextPageRow(step));
-      li.appendChild(buildMissingRow(step));
+    if (role === 'redo') {
+      undoSnapshot = null;
+      closeDrawer();
+      actAndReport({ cmd: 'startRedo', id: id });
+      return;
     }
 
-    /* ---- the steps themselves ---- */
-    if (!collapsed) {
-      var body = document.createElement('ol');
-      body.className = 'set-body';
-      for (var i = index; i < index + size; i++) {
-        body.appendChild(buildStepRow(steps[i], i, true));
+    if (role === 'nextpage') {
+      undoSnapshot = null;
+      actAndReport({ cmd: 'startNextPage', id: id });
+      return;
+    }
+
+    if (role === 'clearnextpage') { actAndReport({ cmd: 'clearNextPage', id: id }); return; }
+
+    if (role === 'dismissrec') {
+      undoSnapshot = null;
+      actAndReport({ cmd: 'startDismiss', id: id });
+      return;
+    }
+
+    if (role === 'cleardismiss') { actAndReport({ cmd: 'clearDismiss', id: id }); return; }
+
+    if (role === 'delete') {
+      /* The flow is built by hand and the button has no confirm, so keep the
+       * whole list as it was. Snapshotting everything rather than the one step
+       * also restores any block that shrank around it. */
+      var doomed = stepById(id);
+      undoSnapshot = {
+        steps: steps.slice(),
+        loadedFrom: loadedFrom,
+        text: 'Deleted “' + trunc(doomed ? titleOf(doomed) : 'that step', 40) + '”.'
+      };
+      closeDrawer();
+      actAndReport({ cmd: 'deleteStep', id: id }).then(function (res) {
+        if (res && res.ok !== false) showUndo();
+      });
+      return;
+    }
+
+    if (role === 'deleteblock') {
+      var units = toUnits(steps);
+      var loc = locate(units, id);
+      if (!loc) return;
+      var gone = {};
+      loc.unit.steps.forEach(function (s) { gone[s.id] = true; });
+      var kept = steps.filter(function (s) { return !gone[s.id]; });
+      closeDrawer();
+      commitSteps(kept, 'Deleted the block (' + loc.unit.steps.length + ' step' +
+                        (loc.unit.steps.length === 1 ? '' : 's') + ').');
+      return;
+    }
+
+    if (role === 'collapse') {
+      var s = stepById(id);
+      if (!s) return;
+      saveSet(id, Object.assign({}, s.set || { size: setSizeOf(s) }, { collapsed: !(s.set && s.set.collapsed) }));
+      return;
+    }
+
+    if (role === 'ungroup') {
+      /* The first step keeps its repeat, so it goes on as a block of one. */
+      saveSet(id, null);
+      return;
+    }
+
+    if (role === 'grow') {
+      var gu = toUnits(steps);
+      var gl = locate(gu, id);
+      var next = gl && gl.u < gu.length - 1 ? gu[gl.u + 1] : null;
+      if (!next || next.block) return;
+      performMove({ kind: 'step', id: next.steps[0].id }, { kind: 'in', u: gl.u, k: -1 });
+      return;
+    }
+
+    if (role === 'shrink') {
+      var su = toUnits(steps);
+      var sl = locate(su, id);
+      if (!sl || sl.unit.steps.length < 2) return;
+      performMove({ kind: 'step', id: sl.unit.steps[sl.unit.steps.length - 1].id }, { kind: 'gap', u: sl.u + 1 });
+      return;
+    }
+
+    if (role === 'takeout') {
+      var tu = toUnits(steps);
+      var tl = locate(tu, id);
+      if (!tl) return;
+      performMove({ kind: 'step', id: id }, { kind: 'gap', u: tl.u + 1 });
+      return;
+    }
+
+    if (role === 'moveup' || role === 'movedown') {
+      moveBy(id, target.dataset.kind === 'block' ? 'block' : 'step', role === 'moveup' ? -1 : 1);
+      return;
+    }
+
+    if (role === 'groupabove' || role === 'groupbelow') {
+      groupWithNeighbour(id, role === 'groupabove' ? -1 : 1);
+      return;
+    }
+
+    if (role === 'loop') {
+      var step = stepById(id);
+      if (!step || step.type !== 'click') return;
+      if (isLooping(step)) {
+        saveRepeat(id, Object.assign({}, step.repeat, { enabled: false }));
+        if (setSizeOf(step) < 2) selection = { id: id, view: 'step' };
+      } else {
+        var previous = step.repeat && squash(step.repeat.pattern) ? step.repeat : null;
+        if (previous) {
+          saveRepeat(id, Object.assign({}, previous, { enabled: true }));
+        } else {
+          var fresh = defaultRepeat(step);
+          saveRepeat(id, fresh);
+          refinePattern(id, fresh.pattern, step.fallbackText);
+        }
+        selection = { id: id, view: 'block' };
       }
-      li.appendChild(body);
-
-      var foot = document.createElement('div');
-      foot.className = 'set-foot';
-      if (looping) foot.appendChild(buildAdvanced(step));
-
-      /* A set built in the wrong order should be fixable in place, rather than
-       * having to ungroup and start over - and a set of one that is already
-       * looping has no tick box to group it with the next step. */
-      var edit = document.createElement('div');
-      edit.className = 'set-edit';
-      if (index + size < steps.length) {
-        var add = document.createElement('button');
-        add.type = 'button';
-        add.className = 'link-btn';
-        add.dataset.role = 'grow';
-        add.dataset.id = step.id;
-        add.textContent = '+ Add step ' + (index + size + 1) + ' to this set';
-        edit.appendChild(add);
-      }
-      if (size > 1) {
-        var shrink = document.createElement('button');
-        shrink.type = 'button';
-        shrink.className = 'link-btn';
-        shrink.dataset.role = 'shrink';
-        shrink.dataset.id = step.id;
-        shrink.textContent = '− Take step ' + (index + size) + ' out of the group';
-        edit.appendChild(shrink);
-
-        var ungroup = document.createElement('button');
-        ungroup.type = 'button';
-        ungroup.className = 'link-btn';
-        ungroup.dataset.role = 'ungroup';
-        ungroup.dataset.id = step.id;
-        ungroup.textContent = 'Split into single steps';
-        edit.appendChild(ungroup);
-      }
-      foot.appendChild(edit);
-      li.appendChild(foot);
+      return;
     }
 
-    return li;
-  }
-
-  /* ---- one ordinary step row ------------------------------------------ */
-
-  /* The tab is only worth naming when it changes: repeating the same chip down
-   * every row is the single biggest source of clutter in a long recording. */
-  function tabChanged(index) {
-    if (index <= 0) return true;
-    var prev = steps[index - 1];
-    var here = steps[index];
-    if (!prev || !here) return true;
-    return (prev.title || prev.url) !== (here.title || here.url);
-  }
-
-  function buildStepRow(step, index, insideSet) {
-    var li = document.createElement('li');
-    li.className = 'step type-' + step.type + (insideSet ? ' in-set' : '');
-    li.dataset.id = step.id;
-    if (mode === 'playing' && play && play.index === index) li.className += ' step-current';
-    if (mode === 'redo' && redoingId === step.id) li.className += ' step-redoing';
-
-    var main = document.createElement('div');
-    main.className = 'step-main';
-
-    if (!insideSet && mode === 'idle') {
-      var pick = document.createElement('input');
-      pick.type = 'checkbox';
-      pick.className = 'pick';
-      pick.checked = !!selected[step.id];
-      pick.dataset.role = 'select';
-      pick.dataset.id = step.id;
-      pick.setAttribute('aria-label', 'Select step ' + (index + 1) + ' for grouping');
-      main.appendChild(pick);
+    if (role === 'check') {
+      var owner = stepById(id);
+      if (!owner || !owner.repeat) return;
+      setReadout(id, 'Looking on the active tab…', '', readouts[id] ? readouts[id].chip : '…');
+      ask({ cmd: 'previewPattern', pattern: owner.repeat.pattern }).then(function (res) {
+        if (!res || res.ok === false) {
+          setReadout(id, sentence('Could not check — ' +
+            ((res && res.error) || 'no answer from the page')), 'error', 'no page');
+          return;
+        }
+        var n = res.count;
+        var text = n === 0
+          ? 'Nothing on that page matches — the repeat would do nothing.'
+          : 'Outlined ' + n + ' element' + (n === 1 ? '' : 's') + ' on ' + trunc(res.tabTitle, 26) +
+            '. Look at the page: those are exactly what the repeat will act on' +
+            (res.labels && res.labels.length ? ' (' + res.labels.slice(0, 3).join(', ') + (n > 3 ? ', …' : '') + ')' : '') + '.';
+        setReadout(id, text, n === 0 ? 'none' : '', n + ' match' + (n === 1 ? '' : 'es'));
+      });
+      return;
     }
+  });
 
-    var idx = document.createElement('span');
-    idx.className = 'idx';
-    idx.textContent = (index + 1) + '.';
-    main.appendChild(idx);
-
-    if (step.type !== 'switchTab' && tabChanged(index)) {
-      var chip = document.createElement('span');
-      chip.className = 'chip';
-      chip.title = step.url || '';
-      chip.textContent = tabName(step);
-      main.appendChild(chip);
-    }
-
-    var full = describe(step);
-    var desc = document.createElement('span');
-    desc.className = 'desc';
-    desc.textContent = full;
-    desc.title = full;                    /* the row is one line; nothing is lost */
-    main.appendChild(desc);
-
-    /* Looping a single step should not require grouping it with anything, so
-     * a click step carries its own Loop button; pressing it promotes the row
-     * to a set card of one. */
-    if (!insideSet && step.type === 'click' && mode === 'idle') {
-      var loop = document.createElement('button');
-      loop.type = 'button';
-      loop.className = 'loop-mini';
-      loop.dataset.role = 'loop';
-      loop.dataset.id = step.id;
-      loop.setAttribute('aria-pressed', 'false');
-      loop.title = 'Run this click once for every matching element on the page';
-      loop.textContent = '⟳ Loop';
-      main.appendChild(loop);
-    }
-
-    if (mode === 'idle') {
-      var again = document.createElement('button');
-      again.type = 'button';
-      again.className = 'redo-mini';
-      again.dataset.role = 'redo';
-      again.dataset.id = step.id;
-      again.title = 'Do this one action again and replace this step with it';
-      again.setAttribute('aria-label', 'Re-record step ' + (index + 1));
-      again.textContent = '↻';
-      main.appendChild(again);
-    }
-
-    var x = document.createElement('button');
-    x.type = 'button';
-    x.className = 'x';
-    x.dataset.role = 'delete';
-    x.dataset.id = step.id;
-    x.title = 'Delete this step';
-    x.setAttribute('aria-label', 'Delete step ' + (index + 1));
-    x.textContent = '×';
-    main.appendChild(x);
-
-    li.appendChild(main);
-
-    if (step.type === 'screenshot' && step.dataUrl) {
-      var img = document.createElement('img');
-      img.className = 'thumb';
-      img.src = step.dataUrl;
-      img.alt = 'Screenshot taken on ' + tabName(step);
-      li.appendChild(img);
-    }
-    return li;
-  }
-
-  /* One row on a looping card: what to do when this page has nothing left.
-   * Kept beside the repeat count rather than behind "Advanced settings",
-   * because carrying on to the next page is an everyday thing to want, not a
-   * setting to go hunting for. */
-  function buildNextPageRow(step) {
-    var row = document.createElement('div');
-    row.className = 'nextpage-bar';
-
-    var label = document.createElement('span');
-    label.className = 'nextpage-label';
-    label.textContent = 'At the end of the page:';
-    row.appendChild(label);
-
-    var control = step.repeat && step.repeat.nextPage;
-    if (control) {
-      var what = document.createElement('span');
-      what.className = 'nextpage-what';
-      what.textContent = 'go to the next page (clicks ' + describeControl(control) + ')';
-      row.appendChild(what);
-
-      var change = document.createElement('button');
-      change.type = 'button';
-      change.className = 'nextpage-btn';
-      change.dataset.role = 'nextpage';
-      change.dataset.id = step.id;
-      change.textContent = 'Change';
-      change.title = 'Record a different control to press when the page runs out';
-      var actions = document.createElement('span');
-      actions.className = 'nextpage-actions';
-      actions.appendChild(change);
-      row.appendChild(actions);
-
-      var drop = document.createElement('button');
-      drop.type = 'button';
-      drop.className = 'nextpage-btn nextpage-drop';
-      drop.dataset.role = 'clearnextpage';
-      drop.dataset.id = step.id;
-      drop.textContent = 'Remove';
-      drop.title = 'Stop when the page runs out, instead of going on';
-      actions.appendChild(drop);
+  function moveBy(id, kind, dir) {
+    var units = toUnits(steps);
+    var loc = locate(units, id);
+    if (!loc) return;
+    var target;
+    if (kind === 'block' || !(loc.unit.block && loc.unit.steps.length > 1)) {
+      target = { kind: 'gap', u: dir < 0 ? loc.u - 1 : loc.u + 2 };
+      if (target.u < 0) return;
+    } else if (dir < 0) {
+      target = loc.k > 0 ? { kind: 'in', u: loc.u, k: loc.k - 1 } : { kind: 'gap', u: loc.u };
     } else {
-      var stops = document.createElement('span');
-      stops.className = 'nextpage-what nextpage-none';
-      stops.textContent = 'it stops.';
-      row.appendChild(stops);
-
-      var add = document.createElement('button');
-      add.type = 'button';
-      add.className = 'nextpage-btn';
-      add.dataset.role = 'nextpage';
-      add.dataset.id = step.id;
-      add.textContent = 'Go to the next page instead';
-      add.title = 'Record the button that shows the next page, and keep going there';
-      var addWrap = document.createElement('span');
-      addWrap.className = 'nextpage-actions';
-      addWrap.appendChild(add);
-      row.appendChild(addWrap);
+      target = loc.k < loc.unit.steps.length - 1 ? { kind: 'in', u: loc.u, k: loc.k + 2 } : { kind: 'gap', u: loc.u + 1 };
     }
-    return row;
+    performMove({ kind: kind, id: id }, target);
   }
 
-  function describeControl(control) {
-    var name = squash(control.fallbackText || control.ariaLabel ||
-                      (control.attrs && control.attrs.name) || control.selector || 'it');
-    return "'" + trunc(name, 30) + "'";
-  }
-
-  /* What to do when a step in the pass cannot be found - which, on a list,
-   * usually means the click brought up a pop-up other than the one recorded.
-   * On the card beside the next-page row rather than behind Advanced, because
-   * a pop-up that is not the expected one is the commonest way a long run gets
-   * derailed. */
-  var MISSING_CHOICES = [
-    ['stop', 'stop and tell me'],
-    ['dismiss', 'close the pop-up and move on to the next one'],
-    ['skip', 'skip that step and carry on with the rest']
-  ];
-
-  function buildMissingRow(step) {
-    var row = document.createElement('div');
-    row.className = 'nextpage-bar missing-bar';
-
-    var label = document.createElement('span');
-    label.className = 'nextpage-label';
-    label.textContent = 'If a step is missing:';
-    row.appendChild(label);
-
-    var select = document.createElement('select');
-    select.className = 'missing-select';
-    select.dataset.fkey = step.id + ':missing';
-    select.dataset.role = 'missing';
-    select.dataset.id = step.id;
-    select.setAttribute('aria-label', 'What to do when a step in the pass cannot be found');
-    MISSING_CHOICES.forEach(function (pair) {
-      var opt = document.createElement('option');
-      opt.value = pair[0];
-      opt.textContent = pair[1];
-      if (pair[0] === onMissingOf(step)) opt.selected = true;
-      select.appendChild(opt);
-    });
-    row.appendChild(select);
-
-    if (onMissingOf(step) === 'dismiss') {
-      var control = step.repeat && step.repeat.dismiss;
-      var how = document.createElement('span');
-      how.className = 'missing-how';
-      how.textContent = control
-        ? 'Closes it by clicking ' + describeControl(control) + ', then Escape or its own Cancel or Close if that fails.'
-        : 'Closes it with Escape, or a Cancel, Close or Dismiss button of its own.';
-      row.appendChild(how);
-
-      var actions = document.createElement('span');
-      actions.className = 'nextpage-actions';
-      var rec = document.createElement('button');
-      rec.type = 'button';
-      rec.className = 'nextpage-btn';
-      rec.dataset.role = 'dismissrec';
-      rec.dataset.id = step.id;
-      rec.textContent = control ? 'Change' : 'Record the button to press';
-      rec.title = 'Bring the pop-up up on the page and click the button that closes it; ' +
-                  'the next click is what gets saved';
-      actions.appendChild(rec);
-      if (control) {
-        var drop = document.createElement('button');
-        drop.type = 'button';
-        drop.className = 'nextpage-btn nextpage-drop';
-        drop.dataset.role = 'cleardismiss';
-        drop.dataset.id = step.id;
-        drop.textContent = 'Remove';
-        drop.title = 'Go back to Escape and the pop-up\'s own Cancel or Close button';
-        actions.appendChild(drop);
-      }
-      row.appendChild(actions);
+  function groupWithNeighbour(id, dir) {
+    var units = toUnits(steps);
+    var loc = locate(units, id);
+    if (!loc) return;
+    var nu = loc.u + dir;
+    if (nu < 0 || nu >= units.length) return;
+    var other = units[nu];
+    if (other.block) {
+      performMove({ kind: 'step', id: id }, { kind: 'in', u: nu, k: dir < 0 ? -1 : 0 });
+    } else if (dir < 0) {
+      performMove({ kind: 'step', id: id }, { kind: 'onto', u: nu, k: 0 });
+    } else {
+      performMove({ kind: 'step', id: other.steps[0].id }, { kind: 'onto', u: loc.u, k: 0 });
     }
-    return row;
   }
 
-  /* ---- the selection bar ---------------------------------------------- */
+  el.drawer.addEventListener('change', function (e) {
+    var target = e.target;
+    if (!target || !target.dataset || target.dataset.role !== 'missing') return;
+    var mStep = stepById(target.dataset.id);
+    if (!mStep || !mStep.repeat) return;
+    var choice = target.value === 'skip' || target.value === 'dismiss' ? target.value : 'stop';
+    saveRepeat(mStep.id, Object.assign({}, mStep.repeat, { enabled: true, onMissing: choice }));
+  });
 
-  /* Both capture modes put the same bar up: go and do one thing on the page,
-   * or cancel. Only the wording and what the click is kept for differ. */
+  el.drawer.addEventListener('input', function (e) {
+    var target = e.target;
+    if (!target || !target.dataset || !target.dataset.role) return;
+    var role = target.dataset.role;
+    if (role !== 'pattern' && role !== 'max' && role !== 'delay') return;
+
+    var step = stepById(target.dataset.id);
+    if (!step) return;
+    var current = step.repeat || defaultRepeat(step);
+    /* Built on what is there, not from a fixed list of fields: a next-page
+     * control or a close button recorded before this edit has to survive it. */
+    var updated = Object.assign({}, current, { enabled: true });
+
+    if (role === 'pattern') {
+      updated.pattern = target.value;
+      refreshCount(step.id, updated.pattern);
+    } else if (role === 'max') {
+      var m = parseInt(target.value, 10);
+      updated.maxRepeats = isNaN(m) ? DEFAULT_MAX_REPEATS : Math.min(MAX_REPEATS_CEILING, Math.max(1, m));
+    } else {
+      var dv = parseFloat(target.value);
+      updated.delaySeconds = isNaN(dv) ? DEFAULT_DELAY_SECONDS : Math.max(DELAY_FLOOR_SECONDS, dv);
+    }
+    step.repeat = updated;
+    saveRepeat(step.id, updated);
+  });
+
+  /* Clamp the visible value once the user leaves the box, so the field always
+   * shows the number that will actually be used. */
+  el.drawer.addEventListener('blur', function (e) {
+    var target = e.target;
+    if (!target || !target.dataset) return;
+    var role = target.dataset.role;
+    if (role !== 'max' && role !== 'delay') return;
+    var step = stepById(target.dataset.id);
+    if (!step || !step.repeat) return;
+    if (role === 'max') target.value = String(step.repeat.maxRepeats);
+    else target.value = String(step.repeat.delaySeconds);
+  }, true);
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && selection && !e.defaultPrevented) {
+      var active = document.activeElement;
+      if (active && el.drawer.contains(active) && active.tagName === 'INPUT') return;
+      closeDrawer();
+    }
+  });
+
+  /* --------------------------------------------------- clicks on the flow */
+
+  el.flow.addEventListener('click', function (e) {
+    var target = e.target;
+    if (mode !== 'idle') return;
+    var roleEl = target.closest ? target.closest('[data-role]') : null;
+    if (roleEl && roleEl.dataset.role === 'collapse') {
+      var s = stepById(roleEl.dataset.id);
+      if (s) saveSet(s.id, Object.assign({}, s.set || { size: setSizeOf(s) }, { collapsed: !(s.set && s.set.collapsed) }));
+      return;
+    }
+    if (target.closest && target.closest('.grip')) return;
+    var head = target.closest ? target.closest('.block-head') : null;
+    if (head) { openDrawer(head.dataset.id, 'block'); return; }
+    var card = target.closest ? target.closest('.card') : null;
+    if (card) {
+      if (selection && selection.id === card.dataset.id && selection.view === 'step') closeDrawer();
+      else openDrawer(card.dataset.id, 'step');
+    }
+  });
+
+  el.flow.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var t = e.target;
+    if (!t || !t.classList) return;
+    if (t.classList.contains('card')) { e.preventDefault(); openDrawer(t.dataset.id, 'step'); }
+    else if (t.classList.contains('block-head')) { e.preventDefault(); openDrawer(t.dataset.id, 'block'); }
+  });
+
+  /* ---------------------------------------------------------- drag and drop */
+
+  function dropTargetAt(node) {
+    var z = node && node.closest ? node.closest('.gap, .block-drop, .card, .block-head') : null;
+    if (!z || !el.flow.contains(z)) return null;
+    if (z.classList.contains('gap')) {
+      if (z.dataset.blockUnit != null) return { kind: 'in', u: Number(z.dataset.blockUnit), k: Number(z.dataset.k), el: z };
+      return { kind: 'gap', u: Number(z.dataset.gap), el: z };
+    }
+    if (z.classList.contains('block-drop')) return { kind: 'in', u: Number(z.dataset.unit), k: -1, el: z };
+    if (z.classList.contains('block-head')) return { kind: 'in', u: Number(z.dataset.unit), k: -1, el: z.parentNode };
+    return { kind: 'onto', u: Number(z.dataset.unit), k: Number(z.dataset.k), el: z };
+  }
+
+  function allowed(target) {
+    if (!drag || !target) return false;
+    if (drag.kind === 'block' && target.kind !== 'gap') return false;
+    if (target.kind === 'onto' && target.el.dataset.id === drag.id) return false;
+    return true;
+  }
+
+  var overEl = null;
+
+  function markOver(node) {
+    if (overEl === node) return;
+    if (overEl) overEl.classList.remove('over');
+    overEl = node;
+    if (overEl) overEl.classList.add('over');
+  }
+
+  function endDrag() {
+    drag = null;
+    markOver(null);
+    document.body.classList.remove('dragging');
+    var src = el.flow.querySelector('.dragging-src');
+    if (src) src.classList.remove('dragging-src');
+  }
+
+  el.flow.addEventListener('dragstart', function (e) {
+    var handle = e.target.closest ? e.target.closest('[draggable="true"]') : null;
+    if (!handle || mode !== 'idle') { e.preventDefault(); return; }
+    drag = { kind: handle.dataset.dragKind === 'block' ? 'block' : 'step', id: handle.dataset.id };
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', drag.id);
+    } catch (err) { /* some browsers refuse; the drag still works */ }
+    document.body.classList.add('dragging');
+    (drag.kind === 'block' ? handle.parentNode : handle).classList.add('dragging-src');
+  });
+
+  el.flow.addEventListener('dragover', function (e) {
+    if (!drag) return;
+    var target = dropTargetAt(e.target);
+    if (!allowed(target)) { markOver(null); return; }
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'move'; } catch (err) { /* ignore */ }
+    markOver(target.el);
+  });
+
+  el.flow.addEventListener('dragleave', function (e) {
+    if (!drag) return;
+    if (!e.relatedTarget || !el.flow.contains(e.relatedTarget)) markOver(null);
+  });
+
+  el.flow.addEventListener('drop', function (e) {
+    if (!drag) return;
+    e.preventDefault();
+    var target = dropTargetAt(e.target);
+    var d = drag;
+    var ok = allowed(target);
+    endDrag();
+    if (!ok) return;
+    performMove(d, { kind: target.kind, u: target.u, k: target.k });
+  });
+
+  el.flow.addEventListener('dragend', endDrag);
+
+  /* ------------------------------------------------------- capture modes */
+
+  /* All three capture modes put the same bar up: go and do one thing on the
+   * page, or cancel. Only the wording and what the click is kept for differ. */
   function renderRedoBar() {
     var bar = el.redoBar;
     if (mode !== 'redo' && mode !== 'nextpage' && mode !== 'dismiss') {
@@ -1036,7 +1945,7 @@
   function fulfilPendingPatterns() {
     if (mode !== 'idle') return;
     steps.forEach(function (step) {
-      if (!step.needsPattern || !step.repeat || !step.repeat.enabled) return;
+      if (!step.needsPattern || !isLooping(step)) return;
       if (step.type !== 'click') return;
       var fresh = derivePattern(step);
       var updated = Object.assign({}, step.repeat, { pattern: fresh });
@@ -1047,162 +1956,15 @@
     });
   }
 
-  function renderSelectionBar() {
-    var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
-    var bar = el.selectBar;
-    if (!ids.length || mode !== 'idle') { bar.hidden = true; bar.textContent = ''; return; }
-    bar.hidden = false;
-    bar.textContent = '';
-
-    var idxs = ids.map(stepIndexById).filter(function (i) { return i >= 0; }).sort(function (a, b) { return a - b; });
-    var contiguous = idxs.length > 1 && idxs[idxs.length - 1] - idxs[0] === idxs.length - 1;
-
-    var text = document.createElement('span');
-    text.className = 'sel-text';
-    text.textContent = idxs.length + (idxs.length === 1 ? ' step selected' : ' steps selected');
-    bar.appendChild(text);
-
-    var group = document.createElement('button');
-    group.type = 'button';
-    group.className = 'btn btn-play sel-go';
-    group.dataset.role = 'group';
-    group.textContent = 'Put these in a group';
-    group.disabled = !contiguous;
-    bar.appendChild(group);
-
-    var clear = document.createElement('button');
-    clear.type = 'button';
-    clear.className = 'link-btn';
-    clear.dataset.role = 'clearsel';
-    clear.textContent = 'Clear';
-    bar.appendChild(clear);
-
-    if (!contiguous) {
-      var why = document.createElement('p');
-      why.className = 'hint';
-      why.textContent = idxs.length < 2
-        ? 'Tick at least two steps that sit next to each other.'
-        : 'Those steps are not next to each other. A set runs as one unbroken sequence, ' +
-          'so pick a run of steps with no gaps.';
-      bar.appendChild(why);
-    }
-  }
-
-  /* ---- the list ------------------------------------------------------- */
-
-  function renderList(force) {
-    /* Not a rendering concern, and it must not be skipped by the no-change
-     * shortcut below: a re-recorded step keeps the same shape, so the key can
-     * be identical while the loop is still waiting for a usable pattern. */
-    fulfilPendingPatterns();
-
-    var key = renderKey();
-    if (!force && key === lastRenderKey) {
-      highlightCurrent();
-      return;
-    }
-    lastRenderKey = key;
-
-    var snap = captureFocus();
-    el.list.textContent = '';
-    var inside = setMemberIds();
-    for (var i = 0; i < steps.length; i++) {
-      var step = steps[i];
-      if (inside[step.id]) continue;                     /* drawn inside its set */
-      var size = Math.min(setSizeOf(step), steps.length - i);
-      var looping = !!(step.repeat && step.repeat.enabled);
-      if (size > 1 || looping) {
-        el.list.appendChild(buildSetCard(step, i, size));
-        i += size - 1;
-      } else {
-        el.list.appendChild(buildStepRow(step, i, false));
-      }
-    }
-    el.empty.hidden = steps.length > 0;
-    /* The tip about grouping is worth saying only when there are loose steps
-     * sitting next to each other to group. Otherwise it is one more thing to
-     * read that does not apply. */
-    if (el.setHint) {
-      var loose = 0;
-      for (var h = 0; h < steps.length; h++) if (!steps[h].set) loose += 1;
-      el.setHint.hidden = mode !== 'idle' || loose < 2;
-    }
-    el.count.textContent = String(steps.length);
-    restoreFocus(snap);
-    renderSelectionBar();
-    renderRedoBar();
-
-    /* While recording, the step that just happened is the one worth seeing;
-     * otherwise the list quietly fills up out of sight. */
-    if (mode === 'recording' && !snap) el.list.scrollTop = el.list.scrollHeight;
-
-    if (mode !== 'playing') {
-      steps.forEach(function (step) {
-        if (step.repeat && step.repeat.enabled) refreshCount(step.id, step.repeat.pattern);
-      });
-    }
-  }
-
-  function highlightCurrent() {
-    var items = el.list.querySelectorAll('.step');
-    for (var i = 0; i < items.length; i++) {
-      var isCurrent = mode === 'playing' && play && play.index === i;
-      items[i].classList.toggle('step-current', !!isCurrent);
-    }
-    el.count.textContent = String(steps.length);
-  }
-
-  /* ------------------------------------------------- live "matches N" line */
-
-  function sentence(text) {
-    var t = squash(text);
-    return /[.!?]$/.test(t) ? t : t + '.';
-  }
-
-  function setReadout(stepId, text, kind) {
-    var node = el.list.querySelector('[data-readout-for="' + stepId + '"]');
-    if (!node) return;
-    node.className = 'readout' + (kind ? ' readout-' + kind : '');
-    node.textContent = text;
-  }
-
-  function refreshCount(stepId, pattern) {
-    if (countTimers[stepId]) clearTimeout(countTimers[stepId]);
-    countTimers[stepId] = setTimeout(function () {
-      delete countTimers[stepId];
-      if (!String(pattern || '').trim()) {
-        setReadout(stepId, 'Enter a match pattern to see how many elements it finds.', 'error');
-        return;
-      }
-      setReadout(stepId, 'Checking the active tab…');
-      ask({ cmd: 'countMatches', pattern: pattern }).then(function (res) {
-        if (!res || res.ok === false) {
-          setReadout(stepId, sentence('Cannot count right now — ' +
-            ((res && res.error) || 'no answer from the page')), 'error');
-          return;
-        }
-        var n = res.count;
-        setReadout(
-          stepId,
-          'Found ' + n + ' match' + (n === 1 ? '' : 'es') + ' on this page' +
-            (res.tabTitle ? ' (' + trunc(res.tabTitle, 30) + ')' : '') + '.',
-          n === 0 ? 'none' : ''
-        );
-      });
-    }, COUNT_DEBOUNCE_MS);
-  }
-
   /* ------------------------------------------------- spotting a repeat */
 
   /* "Click Connect, then confirm in the pop-out" is almost never meant to
    * happen once - it is a process to run down a whole list. Rather than leave
-   * the user to go and find the grouping controls, the panel works that out
-   * the moment a recording ends: if the click they started with still matches
-   * other elements on the page, the recorded steps are grouped and set to
-   * loop, ready to play. One press of Looping turns it back off. */
+   * the user to build the block, the panel works that out the moment a
+   * recording ends: if the click they started with still matches other
+   * elements on the page, the recorded steps are put in a block and set to
+   * repeat, ready to play. The switch in the block's drawer turns it back off. */
 
-  /* How much of the recording belongs to the process: from the first click up
-   * to the point it moves to another tab. */
   function sameTabRun(list, from) {
     var end = list.length;
     for (var i = from + 1; i < list.length; i++) {
@@ -1210,47 +1972,29 @@
       var here = list[i];
       if ((prev.title || prev.url) !== (here.title || here.url)) { end = i; break; }
     }
-    /* A scroll recorded at the end was the user reaching the next row by hand.
-     * The loop scrolls for itself when it runs out of matches, and replaying a
-     * fixed scroll position every round would fight it. */
     while (end - 1 > from && list[end - 1].type === 'scroll') end -= 1;
     return end - from;
   }
 
-  /* Anything the user has already arranged is left exactly as they left it. */
   function arranged(list) {
     for (var i = 0; i < list.length; i++) {
       if (list[i].set) return true;
-      if (list[i].repeat && list[i].repeat.enabled) return true;
+      if (isLooping(list[i])) return true;
     }
     return false;
   }
 
-  /* What identifies the element the user actually clicked, in the same terms
-   * the page is asked about - never its wording, which is the thing the action
-   * changes. */
   function signatureOfStep(step) {
     var a = step.attrs || {};
     return squash(step.ariaLabel || a.id || a.testId || a.name || '');
   }
 
-  function repeatSetUpNotice(size, count) {
-    return 'Set to repeat: ' + (size === 1 ? 'that step' : 'those ' + size + ' steps') +
-      ' will run on every match found, scrolling down for more as it goes. Press ' +
-      '"Repeating" to turn that off.';
+  function repeatSetUpNotice(size) {
+    return 'Set to repeat: ' + (size === 1 ? 'that step' : 'those ' + size + ' steps are in a block that') +
+      ' will run on every match found, scrolling down for more as it goes. Click the block to change ' +
+      'that or turn it off.';
   }
 
-  /* The click that leads the loop is the first one that turns out to have
-   * company on the page - not simply the first click recorded. Somebody who
-   * searches, filters, then works the results has clicked two things before
-   * reaching the row that repeats, and anchoring on the search button would
-   * loop the wrong thing and swallow the whole recording into one set.
-   * Steps before the anchor stay outside the set and run once, which is what
-   * a search before a loop should do.
-   *
-   * analyzePattern rather than previewPattern: this runs on its own, and
-   * previewPattern scrolls the page and flashes an outline round every match,
-   * which would be a jolt nobody asked for. */
   function firstRepeatable(list, from, budget) {
     for (var i = from; i < list.length; i++) {
       if (list[i].type !== 'click') continue;
@@ -1263,11 +2007,6 @@
         text: step.fallbackText, prefix: stablePrefix(step.ariaLabel || ''),
         signature: signatureOfStep(step)
       }).then(function (look) {
-        /* One match on its own proves nothing - it is as likely to be the
-         * control just clicked, still sitting there, as another row. What
-         * settles it is a match that is demonstrably a different element.
-         * Where the page gives its elements nothing to tell them apart by,
-         * several matches is the best evidence there is. */
         if (look && look.ok !== false && (look.elsewhere >= 1 || look.count >= 2)) {
           return { at: at, step: step, pattern: pattern, count: look.count };
         }
@@ -1278,8 +2017,6 @@
   }
 
   function offerRepeat() {
-    /* Read the recording back rather than trusting what is in hand: the mode
-     * and the steps reach the panel as separate storage writes. */
     return ask({ cmd: 'getState' }).then(function (res) {
       var list = (res && res.ok && res.local && Array.isArray(res.local.steps)) ? res.local.steps : [];
       if (!list.length || arranged(list)) return;
@@ -1299,22 +2036,14 @@
               .then(function () { return saveRepeat(anchor.id, repeat); })
           : saveRepeat(anchor.id, repeat);
         return write.then(function () {
-          /* An attribute alone cannot tell a row that still needs doing from
-           * one already actioned, so the wording gets pinned the same way it
-           * would if the user had pressed Loop themselves. */
           refinePattern(anchor.id, found.pattern, anchor.fallbackText);
-          showLocalNotice(repeatSetUpNotice(size, found.count), 'info');
+          showLocalNotice(repeatSetUpNotice(size), 'info');
         });
       });
     }).catch(function () { /* leave the recording exactly as it was */ });
   }
 
   /* --------------------------------------------------------- step editing */
-
-  function stepById(id) {
-    for (var i = 0; i < steps.length; i++) if (steps[i].id === id) return steps[i];
-    return null;
-  }
 
   function saveRepeat(id, repeat) {
     return actAndReport({ cmd: 'setRepeat', id: id, repeat: repeat });
@@ -1323,127 +2052,6 @@
   function saveSet(id, set) {
     return actAndReport({ cmd: 'setGroup', id: id, set: set });
   }
-
-  function clearSelection() {
-    selected = {};
-    renderList(true);
-  }
-
-  el.list.addEventListener('click', function (e) {
-    var target = e.target;
-    if (!target || !target.dataset || !target.dataset.role) return;
-    var role = target.dataset.role;
-    var id = target.dataset.id;
-
-    if (role === 'redo') {
-      undoSnapshot = null;
-      actAndReport({ cmd: 'startRedo', id: id });
-      return;
-    }
-
-    if (role === 'nextpage') {
-      undoSnapshot = null;
-      actAndReport({ cmd: 'startNextPage', id: id });
-      return;
-    }
-
-    if (role === 'clearnextpage') {
-      actAndReport({ cmd: 'clearNextPage', id: id });
-      return;
-    }
-
-    if (role === 'dismissrec') {
-      undoSnapshot = null;
-      actAndReport({ cmd: 'startDismiss', id: id });
-      return;
-    }
-
-    if (role === 'cleardismiss') {
-      actAndReport({ cmd: 'clearDismiss', id: id });
-      return;
-    }
-
-    if (role === 'delete') {
-      /* A recording is built by hand and the × has no confirm, so keep the
-       * whole list as it was. Snapshotting everything rather than the one step
-       * also restores any action set that shrank around it. */
-      var doomed = stepById(id);
-      undoSnapshot = {
-        steps: steps.slice(),
-        loadedFrom: loadedFrom,
-        text: 'Deleted “' + trunc(doomed ? describe(doomed) : 'that step', 44) + '”.'
-      };
-      actAndReport({ cmd: 'deleteStep', id: id }).then(function (res) {
-        if (res && res.ok !== false) showUndo();
-      });
-      return;
-    }
-
-    if (role === 'collapse') {
-      var s = stepById(id);
-      if (!s) return;
-      var next = Object.assign({}, s.set || { size: setSizeOf(s) }, { collapsed: !(s.set && s.set.collapsed) });
-      saveSet(id, next);
-      return;
-    }
-
-    if (role === 'ungroup') {
-      saveSet(id, null);
-      return;
-    }
-
-    if (role === 'grow' || role === 'shrink') {
-      var owner = stepById(id);
-      var at = stepIndexById(id);
-      if (!owner || at < 0) return;
-      var cur = Math.min(setSizeOf(owner), steps.length - at);
-      var want = role === 'grow' ? cur + 1 : cur - 1;
-      want = Math.max(1, Math.min(want, steps.length - at));
-      saveSet(id, want < 2 && !(owner.repeat && owner.repeat.enabled)
-        ? null
-        : Object.assign({}, owner.set || {}, { size: want }));
-      return;
-    }
-
-    if (role === 'loop') {
-      var step = stepById(id);
-      if (!step || step.type !== 'click') return;
-      if (step.repeat && step.repeat.enabled) {
-        saveRepeat(id, Object.assign({}, step.repeat, { enabled: false }));
-      } else {
-        var previous = step.repeat && squash(step.repeat.pattern) ? step.repeat : null;
-        if (previous) {
-          saveRepeat(id, Object.assign({}, previous, { enabled: true }));
-        } else {
-          var fresh = defaultRepeat(step);
-          saveRepeat(id, fresh);
-          refinePattern(id, fresh.pattern, step.fallbackText);
-        }
-      }
-      return;
-    }
-
-    if (role === 'check') {
-      var owner = stepById(id);
-      if (!owner || !owner.repeat) return;
-      setReadout(id, 'Looking on the active tab…');
-      ask({ cmd: 'previewPattern', pattern: owner.repeat.pattern }).then(function (res) {
-        if (!res || res.ok === false) {
-          setReadout(id, sentence('Could not check — ' +
-            ((res && res.error) || 'no answer from the page')), 'error');
-          return;
-        }
-        var n = res.count;
-        var text = n === 0
-          ? 'Nothing on that page matches — the loop would do nothing.'
-          : 'Outlined ' + n + ' element' + (n === 1 ? '' : 's') + ' on ' + trunc(res.tabTitle, 26) +
-            '. Look at the page: those are exactly what the loop will act on' +
-            (res.labels && res.labels.length ? ' (' + res.labels.slice(0, 3).join(', ') + (n > 3 ? ', …' : '') + ')' : '') + '.';
-        setReadout(id, text, n === 0 ? 'none' : '');
-      });
-      return;
-    }
-  });
 
   el.notice.addEventListener('click', function (e) {
     if (!e.target || !e.target.dataset || e.target.dataset.role !== 'undo') return;
@@ -1458,115 +2066,18 @@
     });
   });
 
-  el.selectBar.addEventListener('click', function (e) {
-    var target = e.target;
-    if (!target || !target.dataset || !target.dataset.role) return;
-    if (target.dataset.role === 'clearsel') { clearSelection(); return; }
-    if (target.dataset.role === 'group') {
-      var idxs = Object.keys(selected).filter(function (k) { return selected[k]; })
-        .map(stepIndexById).filter(function (i) { return i >= 0; })
-        .sort(function (a, b) { return a - b; });
-      if (idxs.length < 2) return;
-      if (idxs[idxs.length - 1] - idxs[0] !== idxs.length - 1) return;
-      var anchor = steps[idxs[0]];
-      selected = {};
-      saveSet(anchor.id, { size: idxs.length, name: '', collapsed: false });
-    }
-  });
-
-  el.list.addEventListener('change', function (e) {
-    var target = e.target;
-    if (!target || !target.dataset) return;
-    if (target.dataset.role === 'missing') {
-      var mStep = stepById(target.dataset.id);
-      if (!mStep || !mStep.repeat) return;
-      var choice = target.value === 'skip' || target.value === 'dismiss' ? target.value : 'stop';
-      saveRepeat(mStep.id, Object.assign({}, mStep.repeat, { enabled: true, onMissing: choice }));
-      return;
-    }
-    if (target.dataset.role === 'select') {
-      selected[target.dataset.id] = target.checked;
-      renderSelectionBar();
-      return;
-    }
-    if (target.dataset.role !== 'toggle') return;
-    var step = stepById(target.dataset.id);
-    if (!step) return;
-    if (target.checked) {
-      /* Re-use what the user last tuned rather than re-deriving over the top
-       * of it; only a step that has never had a pattern gets a fresh one. */
-      var previous = step.repeat && String(step.repeat.pattern || '').trim() ? step.repeat : null;
-      if (previous) {
-        saveRepeat(step.id, {
-          enabled: true, pattern: previous.pattern, maxRepeats: previous.maxRepeats,
-          delaySeconds: previous.delaySeconds,
-          groupSize: previous.groupSize == null ? 1 : previous.groupSize,
-          onMissing: previous.onMissing === 'skip' ? 'skip' : 'stop'
-        });
-      } else {
-        var fresh = defaultRepeat(step);
-        saveRepeat(step.id, fresh);
-        refinePattern(step.id, fresh.pattern, step.fallbackText);
-      }
-    } else if (step.repeat) {
-      /* Kept, not discarded: switching the toggle back on should not cost the
-       * user the pattern they hand-tuned. Disabled config never runs. */
-      saveRepeat(step.id, Object.assign({}, step.repeat, { enabled: false }));
-    }
-  });
-
-  el.list.addEventListener('input', function (e) {
-    var target = e.target;
-    if (!target || !target.dataset || !target.dataset.role) return;
-    var role = target.dataset.role;
-    if (role !== 'pattern' && role !== 'max' && role !== 'delay') return;
-
-    var step = stepById(target.dataset.id);
-    if (!step) return;
-    var current = step.repeat || defaultRepeat(step);
-    /* Built on what is there, not from a fixed list of fields: a next-page
-     * control or a close button recorded before this edit has to survive it.
-     * Rebuilding from a list used to drop them the moment the count was
-     * changed. */
-    var updated = Object.assign({}, current, { enabled: true });
-
-    if (role === 'pattern') {
-      updated.pattern = target.value;
-      refreshCount(step.id, updated.pattern);
-    } else if (role === 'max') {
-      var m = parseInt(target.value, 10);
-      updated.maxRepeats = isNaN(m) ? DEFAULT_MAX_REPEATS : Math.min(MAX_REPEATS_CEILING, Math.max(1, m));
-    } else {
-      var d = parseFloat(target.value);
-      updated.delaySeconds = isNaN(d) ? DEFAULT_DELAY_SECONDS : Math.max(DELAY_FLOOR_SECONDS, d);
-    }
-    step.repeat = updated;
-    saveRepeat(step.id, updated);
-  });
-
-  /* Clamp the visible value once the user leaves the box, so the field always
-   * shows the number that will actually be used. */
-  el.list.addEventListener('blur', function (e) {
-    var target = e.target;
-    if (!target || !target.dataset) return;
-    var role = target.dataset.role;
-    if (role !== 'max' && role !== 'delay') return;
-    var step = stepById(target.dataset.id);
-    if (!step || !step.repeat) return;
-    if (role === 'max') target.value = String(step.repeat.maxRepeats);
-    else target.value = String(step.repeat.delaySeconds);
-  }, true);
-
   /* ------------------------------------------------------- main controls */
 
   function disarmClear() {
     clearArmed = false;
     if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
-    el.btnClear.textContent = 'Delete all steps';
+    el.btnClear.textContent = 'Clear all';
+    el.btnClear.classList.remove('armed');
   }
 
   el.btnStart.addEventListener('click', function () {
     undoSnapshot = null;
+    closeDrawer();
     showLocalNotice('Starting recording…', 'info');
     actAndReport({ cmd: 'startRecording' });
   });
@@ -1580,6 +2091,7 @@
   });
 
   el.btnPlay.addEventListener('click', function () {
+    closeDrawer();
     actAndReport({ cmd: 'play' });
   });
 
@@ -1590,11 +2102,13 @@
   el.btnClear.addEventListener('click', function () {
     if (!clearArmed) {
       clearArmed = true;
-      el.btnClear.textContent = 'Press again to really delete';
+      el.btnClear.textContent = 'Press again to delete every step';
+      el.btnClear.classList.add('armed');
       clearTimer = setTimeout(disarmClear, 4000);
       return;
     }
     disarmClear();
+    closeDrawer();
     actAndReport({ cmd: 'clear' });
   });
 
@@ -1604,7 +2118,7 @@
    * second job can be recorded without losing the first, and Load brings a
    * copy back into the slot. The list is drawn from the index the background
    * keeps; a saved recording's steps are only fetched when it is loaded or
-   * exported, so a library full of screenshots costs nothing to look at. */
+   * exported, so a library full of pictures costs nothing to look at. */
 
   var library = [];          /* { id, name, savedAt, stepCount, loops, bytes } */
   var loadedFrom = null;     /* which saved recording the working steps came from */
@@ -1644,10 +2158,6 @@
     if (armedReplace) { clearTimeout(armedReplace.timer); armedReplace = null; }
   }
 
-  /* Open where there is something to see or something to save; shut when the
-   * panel is a blank slate, so a first-time user is not handed a second
-   * section to read before they have pressed Record. Decided once from the
-   * first state that arrives, then left to the user. */
   function decideLibraryOpen() {
     if (libraryOpenDecided) return;
     libraryOpenDecided = true;
@@ -1660,10 +2170,6 @@
     if (!idle) disarmLibrary();
     el.libraryCount.textContent = String(library.length);
 
-    /* The name box shows the saved recording the steps came from - following
-     * it through a rename, so a Save afterwards updates that entry rather than
-     * making a second one under the old name - and is otherwise left exactly
-     * as the user last typed it. */
     var loadedId = loadedFrom ? loadedFrom.id : null;
     var loadedName = loadedFrom ? loadedFrom.name : '';
     if (loadedFrom && (loadedId !== shownLoadedId ||
@@ -1689,7 +2195,7 @@
     if (loadedFrom) {
       el.libraryLoaded.hidden = false;
       el.libraryLoaded.textContent = 'working on “' + trunc(loadedFrom.name, 22) + '”';
-      el.libraryLoaded.title = 'The steps above were loaded from “' + loadedFrom.name + '”';
+      el.libraryLoaded.title = 'The flow above was loaded from “' + loadedFrom.name + '”';
     } else {
       el.libraryLoaded.hidden = true;
       el.libraryLoaded.textContent = '';
@@ -1736,7 +2242,7 @@
     var meta = document.createElement('span');
     meta.className = 'rec-meta';
     var bits = [entry.stepCount + ' step' + (entry.stepCount === 1 ? '' : 's')];
-    if (entry.loops) bits.push('loops');
+    if (entry.loops) bits.push('repeats');
     if (entry.bytes > 200 * 1024) bits.push(megabytes(entry.bytes));
     if (entry.savedAt) bits.push(whenText(entry.savedAt));
     if (current) bits.push('loaded');
@@ -1757,7 +2263,7 @@
       b.disabled = !enabled;
       actions.appendChild(b);
     }
-    action('load', 'Load', 'Put a copy of these steps in the list above, ready to play', idle, false);
+    action('load', 'Load', 'Put a copy of this flow in the canvas above, ready to play', idle, false);
     action('rename', 'Rename', 'Call this saved recording something else', idle, false);
     action('export', 'Export', 'Download this recording as a file you can keep or share', true, false);
     action('libdelete', armedDelete && armedDelete.id === entry.id ? 'Really delete?' : 'Delete',
@@ -1766,10 +2272,9 @@
     return li;
   }
 
-  /* Loading replaces the working steps, so what was there is kept and offered
-   * back with an Undo, the same way a deleted step is. */
   function loadFromLibrary(entry) {
     disarmLibrary();
+    closeDrawer();
     var had = steps.length;
     var snapshot = had ? {
       steps: steps.slice(),
@@ -1789,8 +2294,6 @@
       }
     });
   }
-
-  /* ---- files: a recording as JSON, so it can be backed up or handed on ---- */
 
   function exportFileName(name) {
     var slug = squash(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -1840,8 +2343,6 @@
     });
   }
 
-  /* ---- controls ---- */
-
   el.btnSave.addEventListener('click', function () {
     var name = squash(el.saveName.value);
     if (!name) {
@@ -1851,8 +2352,6 @@
     }
     var clash = entryByName(name);
     var updating = !!(clash && loadedFrom && clash.id === loadedFrom.id);
-    /* Saving over a different saved recording loses it, so that takes a
-     * second press - the same guard as "Delete all steps". */
     if (clash && !updating && !(armedReplace && armedReplace.name === name)) {
       disarmLibrary();
       armedReplace = {
@@ -1940,7 +2439,7 @@
 
   function commitRename(box) {
     var id = box.dataset.id;
-    if (renamingId !== id) return;          /* already committed, or cancelled */
+    if (renamingId !== id) return;
     renamingId = null;
     var entry = entryById(id);
     var name = squash(box.value);
@@ -1971,9 +2470,6 @@
 
   /* ------------------------------------------------------------ state sync */
 
-  /* Recording ending is the one moment there is something to look at and the
-   * user has not started arranging it. Both paths that change mode come
-   * through here so the offer is made exactly once. */
   var lastMode = 'idle';
 
   function noteMode() {
@@ -1981,9 +2477,6 @@
     lastMode = mode;
     if (was === 'recording' && mode === 'idle') {
       offerRepeat();
-      /* Now there is something worth keeping, so the box it is kept from
-       * should be in view - once; a user who shuts it again is not argued
-       * with. */
       if (!libraryNudged && steps.length && !el.libraryBox.open) {
         libraryNudged = true;
         el.libraryBox.open = true;
@@ -1994,7 +2487,6 @@
   function applyState(local, playState) {
     mode = (local && local.mode) || 'idle';
     redoingId = (local && local.redoStepId) || null;
-    nextPageId = (local && local.nextPageForId) || null;
     steps = Array.isArray(local && local.steps) ? local.steps : [];
     library = Array.isArray(local && local.library) ? local.library : [];
     loadedFrom = (local && local.loadedFrom) || null;
@@ -2004,7 +2496,7 @@
     renderNotice(local && local.notice);
     renderSkipped(local && local.skipped);
     renderSize();
-    renderList(false);
+    renderFlow(false);
     renderLibrary();
     noteMode();
   }
@@ -2015,7 +2507,6 @@
         applyState(res.local, res.play);
         return;
       }
-      /* The service worker may still be waking up - read storage directly. */
       return Promise.all([
         chrome.storage.local.get(['mode', 'steps', 'notice', 'skipped', 'library', 'loadedFrom']),
         chrome.storage.session.get('play')
@@ -2031,21 +2522,18 @@
     if (area === 'local') {
       if (changes.mode) mode = changes.mode.newValue || 'idle';
       if (changes.redoStepId) redoingId = changes.redoStepId.newValue || null;
-      if (changes.nextPageForId) nextPageId = changes.nextPageForId.newValue || null;
       if (changes.steps) steps = Array.isArray(changes.steps.newValue) ? changes.steps.newValue : [];
       if (changes.library) library = Array.isArray(changes.library.newValue) ? changes.library.newValue : [];
       if (changes.loadedFrom) loadedFrom = changes.loadedFrom.newValue || null;
       if (changes.notice) renderNotice(changes.notice.newValue);
       if (changes.skipped) renderSkipped(changes.skipped.newValue);
-      if (changes.mode || changes.steps || changes.redoStepId || changes.nextPageForId) {
+      if (changes.mode || changes.steps || changes.redoStepId || changes.nextPageForId || changes.dismissForId) {
         renderStatus();
         renderButtons();
         renderSize();
         renderSkipped();
-        renderList(false);
+        renderFlow(false);
       }
-      /* Saving or deleting a recording moves the storage total as much as
-       * the steps do, so the size read-out follows the library too. */
       if (changes.library && !changes.steps) renderSize();
       if (changes.mode || changes.steps || changes.library || changes.loadedFrom) renderLibrary();
       if (changes.mode) noteMode();
@@ -2055,11 +2543,9 @@
         renderStatus();
         highlightCurrent();
       }
-      /* The active tab changed or finished loading, so every "matches N"
-       * read-out is now about a different page. */
       if (changes.activeTabStamp && mode !== 'playing') {
         steps.forEach(function (step) {
-          if (step.repeat && step.repeat.enabled) refreshCount(step.id, step.repeat.pattern);
+          if (isLooping(step)) refreshCount(step.id, step.repeat.pattern);
         });
       }
     }

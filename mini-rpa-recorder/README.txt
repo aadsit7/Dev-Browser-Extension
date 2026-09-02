@@ -35,7 +35,7 @@ between tabs.
       Click the Mini RPA Recorder icon in the toolbar.
 
   Start
-      Press "Start Recording". The extension switches on recording in every
+      Press "Record". The extension switches on recording in every
       http/https tab you already have open - you do not need to reload them.
       A small red "REC" badge appears in the top right corner of each tab it is
       watching. Any tab it could not use (chrome:// pages, the Chrome Web Store,
@@ -45,55 +45,71 @@ between tabs.
   Do your actions
       Click things, type into fields, press Enter/Tab/Escape, scroll. Switch
       tabs as much as you like and open new ones - each switch is recorded as
-      its own step. Steps appear in the panel list as you go, numbered and in
-      plain English, each tagged with the page it happened on:
+      its own step. Steps appear in the panel as you go, as a flow of cards
+      running down the page, one card per thing you did:
 
-          1. [Page One] Clicked button 'Go'
-          2. [Page One] Typed "hello world" into input 'query'
-          3. [Page One] Pressed Enter
-          4. Switched to tab: Invites
-          5. [Invites] Clicked button 'Accept'
+          1  [type]    Type "hello world"       into input 'query'
+          2  [key]     Press Enter              in input 'query'
+             on Invites
+          3  [click]   Click 'Accept'           button
 
-      The list stays deliberately tight: one line per step, and the page name
-      appears only where it changes rather than on every row, so a long
-      recording is still something you can read down. The full wording of any
-      step is on the row itself if it had to be trimmed.
+      Each card carries an icon for the kind of action, the action in plain
+      English, and what it acted on underneath. The page a step happened on is
+      marked on the line between cards only where it changes, so a long
+      recording still reads as one flow. Click any card to see everything
+      about it.
 
-      Press "Screenshot" at any point during recording to capture the visible
-      part of the current tab. It appears in the list as a thumbnail. Screenshots
-      are reference images only - they are skipped during playback.
+      Press "Take a picture" at any point during recording to capture the
+      visible part of the current tab. It appears as a card with a thumbnail.
+      Pictures are reference images only - they are skipped during playback.
+
+  Change a step
+      Click a card and a drawer slides up with everything about that step:
+      the page, the element, how it was found, and what to do with it -
+      re-record it, delete it, move it, group it, or make it repeat. Click the
+      card again, press the x, or press Escape to close the drawer. Nothing
+      about a step is edited on the card itself; the flow stays a flow.
 
   Fix one step without redoing the lot
-      The ↻ on any step re-records just that step. Press it, go to the page, do
-      that one action, and it replaces the step - recording stops by itself
+      Click the card and press "Re-record this step". Go to the page, do that
+      one action, and it replaces the step - recording stops by itself
       straight afterwards, so nothing else gets picked up. The step keeps its
-      place, so an action set it belongs to is left exactly as it was. "Cancel"
+      place, so a block it belongs to is left exactly as it was. "Cancel"
       backs out and leaves the step alone.
 
-      If the step you re-recorded had a loop on it, the loop stays on but its
+      If the step you re-recorded was repeating, the repeat stays on but its
       match pattern is worked out again from the new element, because the old
-      pattern described the old one. The panel says so, and the "currently
-      matches N" read-out updates - worth a look before you play.
+      pattern described the old one. The panel says so, and the match count on
+      the block updates - worth a look before you play.
+
+  Arrange the flow
+      Cards can be dragged: up and down to reorder them, onto another card to
+      put the two in a block that runs as one thing, into a block to add a
+      step to it, or out of a block to take one away. A block is dragged by
+      its header and moves as a whole. Every move can be undone with the
+      "Undo" that appears. If you would rather not drag, the drawer has "Move
+      up", "Move down", "Group with the step above" and "Group with the step
+      below", and, inside a block, "Take out of the block".
 
   Tidy up
-      The small x on any step deletes just that step, and an "Undo" appears in
-      case that was not what you meant - it puts the step back where it was,
-      along with any action set that shrank around it. "Clear" wipes the whole
-      recording (it asks for a second click first).
+      Click a card and press "Delete this step"; an "Undo" appears in case
+      that was not what you meant - it puts the step back where it was, along
+      with any block that shrank around it. "Clear all", at the top of the
+      flow, wipes the whole recording (it asks for a second click first).
 
   Stop
-      Press "Stop Recording". The recording is saved and survives closing the
+      Press "Stop recording". The recording is saved and survives closing the
       side panel, closing the tab, and restarting Chrome.
 
   Play
       Press "Play". The extension brings the right tab to the front before each
       step, finds the element, scrolls it into view, briefly outlines it in
       orange, then acts on it. The status line at the top shows which step is
-      running. "Stop Playback" halts it - including part way through a repeat
-      loop, not just between steps.
+      running, and the card that is running is lit up. "Stop" halts it -
+      including part way through a repeat, not just between steps.
 
   Keep it
-      Give the recording a name in "Saved recordings", under the step list, and
+      Give the recording a name in "Saved recordings", under the flow, and
       press Save. It stays on that list however many other jobs you record
       after it, and Load brings it back. Section 3 has the details.
 
@@ -102,7 +118,7 @@ between tabs.
 3. SAVED RECORDINGS
 -------------------------------------------------------------------------------
 
-The step list holds one recording at a time. "Saved recordings", just under it,
+The flow holds one recording at a time. "Saved recordings", just under it,
 is where you keep the ones you want to come back to, so setting up a second job
 does not cost you the first. The section opens by itself once there is
 something to save or something saved; the triangle on its header folds it away.
@@ -122,7 +138,7 @@ something to save or something saved; the triangle on its header folds it away.
       original.
 
   Load
-      Puts a copy of that recording in the step list, ready to play. Whatever
+      Puts a copy of that recording in the flow, ready to play. Whatever
       was in the list is not thrown away: an Undo appears, and pressing it puts
       the previous steps back exactly as they were. Loading never changes the
       saved copy - edit the steps, loop them differently, delete one - and
@@ -169,20 +185,20 @@ process meant to run down a whole list, not to happen once, so when you stop
 recording the extension works that out for itself.
 
 If the click you started with still matches other elements on the page, your
-steps are grouped into an ACTION SET and switched to looping for you, and the
-panel says so:
+steps are put in a REPEAT BLOCK for you - drawn on the canvas as a container
+round its cards, with a header that says "Repeat for each match" and a live
+count of how many elements match - and the panel says so:
 
-    This looks like a repeating process, so it is set up to loop: those 2
-    steps run once for each match, and 8 elements match on this page right
-    now. Press Play to run it down the list - it scrolls to load more as it
-    goes. Press Looping to turn it off.
+    Set to repeat: those 2 steps are in a block that will run on every match
+    found, scrolling down for more as it goes. Click the block to change that
+    or turn it off.
 
 So the whole job is: record Connect, confirm in the pop-out, stop, press Play.
 
 The click that leads the loop is the first one that turns out to have company on
 the page, not simply the first one you recorded. If you search, filter and then
-work the results, the search and the filter stay outside the set and run once,
-and the row click is what repeats - which is what you meant.
+work the results, the search and the filter stay outside the block and run
+once, and the row click is what repeats - which is what you meant.
 
 What counts as "other elements" is deliberately strict. One match on its own
 proves nothing - it is as likely to be the button you just pressed, still
@@ -193,45 +209,54 @@ gives its buttons nothing to tell them apart by, two or more matches is the best
 evidence available and that is what gets used. A one-off control - a Search
 button, a Save - is left exactly as recorded.
 
-Nothing is run for you. Setting it up and running it stay separate, and one
-press of "Looping" turns it back off.
+Nothing is run for you. Setting it up and running it stay separate, and the
+Repeat switch in the block's drawer turns it back off.
 
-ACTION SETS BY HAND
+BLOCKS BY HAND
 
-You can also build a set yourself, which is what you want when the recording
+You can also build a block yourself, which is what you want when the recording
 covers more than one process, or when the click you started with is not the one
 that should repeat.
 
-To make one, tick two or more steps that sit next to each other and press
-"Group into an action set". They collapse into a single card showing what the
-set does and how many steps it covers. The card opens and closes with the
-triangle on its left, so a long recording stays readable.
+To make one, drag a card and drop it onto the card it belongs with; the two
+become a block, drawn as a container round its cards with a header saying what
+it does and how many steps it covers. Drag more cards into the block to grow
+it, or out of it to shrink it. The header's triangle folds the block away, so a
+long recording stays readable, and the header can be dragged to move the whole
+block.
 
-A set can be adjusted in place - "+ Add step N to this set" and "- Drop step N"
-on the card - so you do not have to ungroup and start over if you bundled one
-step too few. "Ungroup" puts the steps back as they were.
+Everything a block can be told is in its drawer - click the header. "Add the
+step below" and "Take the last step out" adjust it in place, "Split into
+single steps" puts the steps back as they were, and "Delete these N steps"
+removes the lot (with an Undo).
 
-THE LOOP BUTTON
+THE REPEAT SWITCH
 
-Every set has a Loop button, and so does any single click step that is not in a
-set. Press it and the step or set stops being "do this once" and becomes "do
-this once for every matching element on the page".
+Every block's drawer has a switch, "Repeat for each match", and so does the
+drawer of any single click step that is not in a block. Switch it on and the
+step or block stops being "do this once" and becomes "do this once for every
+matching element on the page". A block can only repeat if it starts with a
+click - the thing that is on every row - and the drawer says so otherwise.
 
-Turning Loop on shows the everyday controls and nothing else:
+With it on, the drawer shows the everyday controls and nothing else:
 
     Repeat up to [25] times          [Show me on the page]
-    When this page runs out          stop    [+ Go to the next page]
-    If a step is missing             [stop and tell me]
+    At the end of the page:  it stops.   [Go to the next page instead]
+    If a step is missing:    [stop and tell me]
 
 That is the whole common case. The match pattern and the wait between turns
-sit behind "Advanced settings", closed by default.
+sit behind "Advanced settings", closed by default. On the canvas, a repeating
+block shows a live count of how many elements match on the page in the active
+tab.
 
-Steps inside a set run only inside it - they are not replayed again afterwards
-- and a set cannot contain another looping step.
+Steps inside a block run only inside it - they are not replayed again
+afterwards - and a block cannot contain another repeating step: drag a
+repeating card into a block and its repeat is switched off, which the panel
+says as it does it.
 
 WHEN THIS PAGE RUNS OUT
 
-A looping card carries one more line, under the repeat count:
+The drawer of a repeating block carries one more line, under the repeat count:
 
     When this page runs out    stop    [+ Go to the next page]
 
@@ -243,7 +268,7 @@ that control.
 
 Nothing else changes. It is not added as a step, the steps you recorded are
 untouched, and a loop that was already set up keeps its pattern, its count and
-its timing. The card then reads:
+its timing. The line then reads:
 
     When this page runs out    click 'Next'    [Change] [Remove]
 
@@ -274,7 +299,7 @@ to itself the loop stops, because a pass that did not finish usually means the
 action did not happen either. On a long list that is the wrong answer: what you
 want is to close whatever came up, give up on that one row, and carry on.
 
-The "If a step is missing" line on the looping card is where that is decided:
+The "If a step is missing" line in the block's drawer is where that is decided:
 
     If a step is missing    [close the pop-up and move on to the next one]
 
@@ -389,14 +414,14 @@ warning.
 WORKED EXAMPLE
 
   1. On a page with a list of repeating buttons (invitations, notifications,
-     "Dismiss" rows - whatever), press Start Recording.
-  2. Click ONE of those buttons. Press Stop Recording.
-  3. In the step list, press "Loop" on that step (or tick it together with the
-     steps that follow it and group them into an action set first, then press
-     Loop on the set).
-  4. Look at the read-out:
+     "Dismiss" rows - whatever), press Record.
+  2. Click ONE of those buttons. Press "Stop recording".
+  3. Click that step's card and switch "Repeat for each match" on (or first
+     drag the steps that follow it onto it to make a block, then click the
+     block's header and switch it on there).
+  4. Look at the read-out in the drawer, and the count on the block:
 
-         Currently matches 5 elements on the active tab (Invites).
+         Found 5 matches on this page (Invites).
 
      This counts the pattern against the page in the active tab right now, and
      it re-counts whenever you edit the pattern or switch to a different page.
@@ -404,7 +429,8 @@ WORKED EXAMPLE
      the rows that still need doing rather than every row you can see. If it
      says 0, the pattern is too narrow. If it is higher than the number of rows
      still to do, it is too broad and is probably picking up rows you have
-     already actioned - widen or narrow it by hand in the "Match pattern" box.
+     already actioned - widen or narrow it by hand in the "Which things to
+     repeat on" box under Advanced settings.
   5. Set "Repeat up to N times" (default 25), then press "Show me on the page"
      and look at what gets outlined - those are exactly the elements the loop
      will act on. If the outlines are on the right rows, the pattern is right.
@@ -656,8 +682,9 @@ boundaries:
   manifest.json    Manifest V3 definition, permissions, side panel wiring
   sidepanel.html   Control panel markup (no inline script, as MV3 requires)
   sidepanel.css    All panel styling
-  sidepanel.js     Panel logic: buttons, step list, repeat editor, live counts,
-                   saved recordings and their files
+  sidepanel.js     Panel logic: the flow canvas of cards and blocks, the
+                   drawer, drag and drop, live counts, saved recordings and
+                   their files
   background.js    Service worker: injection, tab matching, playback sequencing,
                    the saved-recordings store and import checking
   content.js       Injected into pages: records actions, replays them, runs the
