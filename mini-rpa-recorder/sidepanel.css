@@ -797,3 +797,23 @@ body {
 .nextpage-btn:hover { background: rgba(31, 111, 235, 0.08); }
 .nextpage-drop { border-color: #b42318; color: #b42318; }
 .nextpage-drop:hover { background: rgba(180, 35, 24, 0.08); }
+
+/* If a step is missing — the same kind of row as the next-page line. */
+.missing-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 5px;
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid #b9cdf5;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.missing-how {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}

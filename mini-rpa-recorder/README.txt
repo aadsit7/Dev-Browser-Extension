@@ -217,13 +217,14 @@ Every set has a Loop button, and so does any single click step that is not in a
 set. Press it and the step or set stops being "do this once" and becomes "do
 this once for every matching element on the page".
 
-Turning Loop on shows two things and nothing else:
+Turning Loop on shows the everyday controls and nothing else:
 
     Repeat up to [25] times          [Show me on the page]
+    When this page runs out          stop    [+ Go to the next page]
+    If a step is missing             [stop and tell me]
 
-That is the whole common case. Everything else - the match pattern, the wait
-between turns, what to do if a step is missing - sits behind "Match pattern and
-timing", closed by default.
+That is the whole common case. The match pattern and the wait between turns
+sit behind "Advanced settings", closed by default.
 
 Steps inside a set run only inside it - they are not replayed again afterwards
 - and a set cannot contain another looping step.
@@ -262,6 +263,65 @@ more only once before turning the page, instead of three times. A paged list is
 not an endless one, and three fruitless scrolls would be six seconds of nothing
 on every page. A scroll that does bring rows in still counts as progress, so an
 endless list inside a paged one keeps working as before.
+
+WHEN A DIFFERENT POP-UP COMES UP
+
+A pass is recorded against one way the page behaves: click Connect, and the
+"send without a note?" box appears. Some rows behave differently. Every so
+often the same click brings up a box that insists on a note, or a notice that a
+limit has been reached, and the button the next step wants is not there. Left
+to itself the loop stops, because a pass that did not finish usually means the
+action did not happen either. On a long list that is the wrong answer: what you
+want is to close whatever came up, give up on that one row, and carry on.
+
+The "If a step is missing" line on the looping card is where that is decided:
+
+    If a step is missing    [close the pop-up and move on to the next one]
+
+With that chosen, a step that cannot be found within five seconds is taken as a
+sign that something else is in the way. The loop closes it, gives up the rest of
+the pass for that row, and moves on to the next match. Closing is done in a
+fixed order, and each attempt is checked before the next is tried:
+
+  1. a close button you recorded for it, if you have (see below);
+  2. Escape;
+  3. a control of the pop-up's own that only closes it: an x marked Close or
+     Dismiss, then Cancel, Not now, No thanks, Skip, Maybe later, and only
+     after those Got it or OK;
+  4. a native dialog's own close.
+
+Buttons that would do something - Send, Connect, Submit, Delete - are never
+pressed. A pop-up that offers nothing but those is left alone, and the loop
+stops and names it rather than guess. A confirm that comes up in the wake of a
+close ("discard?") is closed the same way. If, after all that, something is
+still in the way, the loop stops and says which pop-up it could not close.
+
+If the pop-up has a close button the list above does not find - an icon with no
+label, an unusual wording - press "Record the button to press", bring the pop-up
+up on the page, and click that button. The next click is saved as the control,
+exactly as a next-page control is, and it is what gets tried first from then
+on. "Remove" goes back to Escape and the pop-up's own buttons.
+
+Each row given up on is counted, and the run summary says how many rows were
+passed over and which pop-ups came up:
+
+    3 row(s) were passed over because a different pop-up came up and was
+    closed: "Add a note to your invitation" x2 (pressed Escape), "You've
+    reached the weekly invitation limit" (clicked 'Got it').
+
+Passing over a row counts as progress, not as a click that did nothing, so the
+stall guard does not trip on a run of them. Two things do stop the loop:
+
+  - the same pop-up on five rows in a row. A box that comes up for every row
+    is about the account or the page, not any one row - a limit that has been
+    reached, say - and closing it seventy more times would achieve nothing;
+  - a row given up on in a list whose rows cannot be told apart. Where the
+    matches have no aria-label, id or name, the loop takes the first match
+    each round; after a close that would be the very same row, and the same
+    pop-up, for ever. The loop says so and stops instead.
+
+Where the rows can be told apart - the usual case on a list of people - the
+passed-over row is simply left behind and the next one is taken.
 
 SHOW ME ON THE PAGE
 
@@ -348,9 +408,9 @@ WORKED EXAMPLE
   5. Set "Repeat up to N times" (default 25), then press "Show me on the page"
      and look at what gets outlined - those are exactly the elements the loop
      will act on. If the outlines are on the right rows, the pattern is right.
-     Timing and the missing-step setting live under "Match pattern and timing";
-     leave "If a step is missing" on "Stop and tell me" unless one of the steps
-     is genuinely optional.
+     Timing lives under "Advanced settings". Leave "If a step is missing" on
+     "stop and tell me" unless the click sometimes brings up a different
+     pop-up - see WHEN A DIFFERENT POP-UP COMES UP above.
   6. Press Play. The status line shows a live counter:
 
          Repeat 12 of up to 25
@@ -416,10 +476,17 @@ found - a dialog that never opened, a button that moved:
       and carrying on from there quietly does the wrong thing to every row after
       it.
 
+  Close the pop-up and move on to the next one
+      The pass waits five seconds, closes whatever is in the way, gives up the
+      rest of the pass for that row, and takes the next match. The row is
+      counted and the pop-up named in the summary. This is the one to choose
+      when the click sometimes brings up something other than the box you
+      recorded against - see WHEN A DIFFERENT POP-UP COMES UP above.
+
   Skip it and carry on
-      The pass waits five seconds, skips that step, and moves on, reporting how
-      many steps it skipped at the end. Choose this only when a step really is
-      optional on some rows.
+      The pass waits five seconds, skips that step, and moves on to the rest of
+      the pass, reporting how many steps it skipped at the end. Choose this
+      only when a step really is optional on some rows.
 
 The loop stops when any of these happens:
 
@@ -434,6 +501,9 @@ The loop stops when any of these happens:
     rounds." This is what stops it spinning forever on a page that quietly
     ignores simulated clicks.
   - a step in the pass cannot be found and "If a step is missing" is set to stop;
+  - with "If a step is missing" set to close the pop-up: the same pop-up has
+    come up on five rows in a row, a pop-up could not be closed, or a row was
+    given up on in a list whose rows cannot be told apart;
   - a dialog is still open eight seconds after a pass finished;
   - the follow-on steps in a pass stop being found altogether, which means the
     page is no longer behaving the way it did when you recorded.
