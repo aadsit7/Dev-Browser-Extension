@@ -1806,6 +1806,20 @@ function handleMessage(msg, sender) {
     case 'setRepeat':
       return updateStep(msg.id, { repeat: msg.repeat || null, needsPattern: false });
 
+    /* The panel rearranges steps - a drag, a move, a block built or taken
+     * apart - as one whole-list write, so a set can never be left half
+     * updated; it keeps an Undo of its own the same way it does for a delete. */
+    case 'setSteps':
+      return serialize(function () {
+        var arranged = Array.isArray(msg.steps) ? msg.steps : [];
+        return saveSteps(arranged)
+          /* No notice unless one is asked for: the panel puts up its own,
+           * with the Undo on it, and a second one arriving a moment later
+           * would paint over it. */
+          .then(function () { return msg.note ? notice(msg.note, 'info') : null; })
+          .then(function () { return { ok: true }; });
+      });
+
     case 'restoreSteps':
       return serialize(function () {
         var steps = Array.isArray(msg.steps) ? msg.steps : [];
