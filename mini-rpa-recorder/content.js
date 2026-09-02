@@ -543,22 +543,34 @@ if (window.__miniRpaLoaded) {
       if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
     }
 
+    /* Every mode in which a click on the page is being listened for, and what
+     * the badge says while it is. */
+    var LISTENING = {
+      recording: '● REC',
+      redo: '● REDO',
+      nextpage: '● NEXT PAGE',
+      dismiss: '● CLOSE BUTTON'
+    };
+
     function setRecording(on, mode) {
       recording = !!on;
-      if (recording) {
-        showBadge(mode === 'redo' ? '● REDO' : mode === 'nextpage' ? '● NEXT PAGE' : '● REC');
-      } else hideBadge();
+      if (recording) showBadge(LISTENING[mode] || '● REC');
+      else hideBadge();
+    }
+
+    function listensIn(mode) {
+      return Object.prototype.hasOwnProperty.call(LISTENING, String(mode));
     }
 
     try {
       chrome.storage.local.get('mode').then(function (data) {
-        setRecording(data && (data.mode === 'recording' || data.mode === 'redo' ||
-                              data.mode === 'nextpage'), data && data.mode);
+        var m = data && data.mode;
+        setRecording(listensIn(m), m);
       }).catch(function () {});
       chrome.storage.onChanged.addListener(function (changes, area) {
         if (area === 'local' && changes.mode) {
           var m = changes.mode.newValue;
-          setRecording(m === 'recording' || m === 'redo' || m === 'nextpage', m);
+          setRecording(listensIn(m), m);
         }
       });
     } catch (e) { /* storage unavailable - stay idle */ }
@@ -1066,6 +1078,183 @@ if (window.__miniRpaLoaded) {
       })();
     }
 
+    /* --------------------------------------------------- closing a pop-up */
+
+    /* Controls that close a pop-up without doing anything else, in the order
+     * they are tried: an × marked Close or Dismiss, then the ways of saying
+     * no, then plain acknowledgements. Anything that would act - Send,
+     * Connect, Submit, Delete - is never on these lists; a pop-up that
+     * offers nothing else is left alone and reported rather than guessed at. */
+    var CLOSE_ARIA = /^(close|dismiss|cancel)(\b|$)/i;
+    var CANCEL_TEXT = {
+      'cancel': 1, 'not now': 1, 'no thanks': 1, 'no, thanks': 1, 'no': 1, 'dismiss': 1,
+      'close': 1, 'skip': 1, 'skip for now': 1, 'maybe later': 1, 'later': 1,
+      'never mind': 1, 'nevermind': 1, 'discard': 1, '×': 1, '✕': 1, '✖': 1, 'x': 1
+    };
+    var ACK_TEXT = { 'got it': 1, 'ok': 1, 'okay': 1, 'understood': 1, 'i understand': 1 };
+
+    /* For the summary: an × button is better named by its label than its glyph. */
+    function buttonLabel(el) {
+      var text = squash(visibleText(el));
+      if (!/[a-z0-9]/i.test(text)) text = '';
+      return squash(text || attr(el, 'aria-label') || attr(el, 'title') || el.value || visibleText(el) || '');
+    }
+
+    function closeCandidates(dlg) {
+      var nodes;
+      try { nodes = deepQueryAll('button, [role="button"], input[type="button"]', dlg); }
+      catch (e) { return []; }
+      var byAria = [];
+      var byCancel = [];
+      var byAck = [];
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (!isUsable(n)) continue;
+        var text = squash(visibleText(n) || n.value || '').toLowerCase();
+        var aria = attr(n, 'aria-label').toLowerCase();
+        var title = attr(n, 'title').toLowerCase();
+        if (CLOSE_ARIA.test(aria) || CLOSE_ARIA.test(title)) byAria.push(n);
+        else if (CANCEL_TEXT[text]) byCancel.push(n);
+        else if (ACK_TEXT[text]) byAck.push(n);
+      }
+      return byAria.concat(byCancel, byAck).slice(0, 3);
+    }
+
+    /* What a pop-up calls itself, for the run summary: its labelled heading,
+     * its first heading, its label, or failing all of those its opening words. */
+    function dialogHeading(dlg) {
+      var el = null;
+      var by = attr(dlg, 'aria-labelledby').split(/\s+/)[0];
+      if (by) {
+        var root = rootOf(dlg);
+        try { el = root.getElementById ? root.getElementById(by) : null; } catch (e) { el = null; }
+        if (!el) { try { el = document.getElementById(by); } catch (e2) { el = null; } }
+      }
+      if (!el) {
+        try { el = dlg.querySelector('h1, h2, h3, h4, [role="heading"]'); } catch (e3) { el = null; }
+      }
+      var text = el ? visibleText(el) : '';
+      if (!text) text = attr(dlg, 'aria-label');
+      if (!text) text = visibleText(dlg);
+      return squash(text).slice(0, 80);
+    }
+
+    function dialogGone(dlg) {
+      if (!dlg.isConnected) return true;
+      if (dlg.tagName === 'DIALOG' && !dlg.hasAttribute('open')) return true;
+      var rect = dlg.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return true;
+      return openDialog() !== dlg;
+    }
+
+    function waitDialogGone(dlg, timeoutMs) {
+      var end = Date.now() + timeoutMs;
+      return (function attempt() {
+        if (dialogGone(dlg)) return Promise.resolve(true);
+        if (aborted || Date.now() >= end) return Promise.resolve(false);
+        return sleep(100).then(attempt);
+      })();
+    }
+
+    /* On some pages the list itself lives in a pop-up. That one is never in
+     * the way, whatever else is. */
+    function holdsMatches(dlg, pattern) {
+      var nodes;
+      try { nodes = queryPattern(pattern); } catch (e) { return false; }
+      for (var i = 0; i < nodes.length; i++) if (containsDeep(dlg, nodes[i])) return true;
+      return false;
+    }
+
+    /* The ways of closing a pop-up, tried in turn and each checked before the
+     * next: a control the user recorded for it, Escape, a Close or Cancel
+     * button of its own, then a native dialog's own close. Answers how it was
+     * closed, or nothing if it is still there. */
+    function tryClose(dlg, control) {
+      function attempt(act) {
+        var how = act();
+        if (!how) return Promise.resolve('');
+        return waitDialogGone(dlg, 1500).then(function (gone) { return gone ? how : ''; });
+      }
+      var plans = [];
+      if (control && control.selector !== undefined) {
+        plans.push(function () {
+          return attempt(function () {
+            var el = findWithin(dlg, control);
+            if (!el) return '';
+            bringIntoView(el);
+            clickElement(el);
+            return "clicked '" + squash(control.fallbackText || control.ariaLabel || buttonLabel(el)).slice(0, 30) + "'";
+          });
+        });
+      }
+      plans.push(function () {
+        return attempt(function () {
+          var active = document.activeElement;
+          pressKey(active && containsDeep(dlg, active) ? active : dlg, 'Escape');
+          return 'pressed Escape';
+        });
+      });
+      plans.push(function () {
+        var buttons = closeCandidates(dlg);
+        var k = 0;
+        function nextButton() {
+          if (k >= buttons.length) return Promise.resolve('');
+          var btn = buttons[k++];
+          return attempt(function () {
+            if (!isUsable(btn)) return '';
+            bringIntoView(btn);
+            clickElement(btn);
+            return "clicked '" + buttonLabel(btn).slice(0, 30) + "'";
+          }).then(function (how) { return how || nextButton(); });
+        }
+        return nextButton();
+      });
+      if (dlg.tagName === 'DIALOG' && typeof dlg.close === 'function') {
+        plans.push(function () {
+          return attempt(function () {
+            try { dlg.close(); } catch (e) { return ''; }
+            return 'closed the dialog';
+          });
+        });
+      }
+      var i = 0;
+      function next() {
+        if (aborted || i >= plans.length) return Promise.resolve('');
+        return plans[i++]().then(function (how) { return how || next(); });
+      }
+      return next();
+    }
+
+    /* A pop-up other than the one the pass expects is in the way. Close it,
+     * and whatever comes up in its wake - a "discard?" confirm, say - until
+     * the page is clear or nothing works. Reports what it was and how it went. */
+    function repeatDismiss(pattern, control) {
+      var attempts = 0;
+      var first = null;
+      function result(clear) {
+        return {
+          ok: true,
+          hadDialog: !!first,
+          dismissed: !!first && clear,
+          heading: first ? first.heading : '',
+          how: first ? first.how : ''
+        };
+      }
+      function cycle() {
+        var dlg = openDialog();
+        if (!dlg || holdsMatches(dlg, pattern)) return Promise.resolve(result(true));
+        if (aborted || attempts >= 3) return Promise.resolve(result(false));
+        attempts += 1;
+        if (!first) first = { heading: dialogHeading(dlg), how: '' };
+        return tryClose(dlg, control).then(function (how) {
+          if (!how) return result(false);
+          if (!first.how) first.how = how;
+          return sleep(300).then(cycle);
+        });
+      }
+      return cycle();
+    }
+
     /* Lazy lists only reveal the next batch once you reach the bottom. */
     function repeatRescue(pattern) {
       try { window.scrollTo(0, document.documentElement.scrollHeight); } catch (e) { /* ignore */ }
@@ -1135,6 +1324,13 @@ if (window.__miniRpaLoaded) {
       if (msg.cmd === 'repeatRescue') {
         aborted = false;
         repeatRescue(msg.pattern).then(sendResponse).catch(function (e) {
+          sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
+        });
+        return true;
+      }
+      if (msg.cmd === 'repeatDismiss') {
+        aborted = false;
+        repeatDismiss(msg.pattern, msg.control || null).then(sendResponse).catch(function (e) {
           sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
         });
         return true;

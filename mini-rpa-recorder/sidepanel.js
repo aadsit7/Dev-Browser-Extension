@@ -275,7 +275,8 @@
   }
 
   function onMissingOf(step) {
-    return (step.repeat && step.repeat.onMissing) === 'skip' ? 'skip' : 'stop';
+    var v = step.repeat && step.repeat.onMissing;
+    return v === 'skip' || v === 'dismiss' ? v : 'stop';
   }
 
   function setSizeOf(step) {
@@ -322,10 +323,13 @@
         : mode === 'playing' ? 'Playing'
         : mode === 'redo' ? 'Re-recording'
         : mode === 'nextpage' ? 'Next page'
+        : mode === 'dismiss' ? 'Close button'
         : 'Idle';
 
     if (mode === 'nextpage') {
       detail = 'waiting for you to click the next-page button';
+    } else if (mode === 'dismiss') {
+      detail = 'waiting for you to click the button that closes the pop-up';
     } else if (mode === 'redo') {
       var at = redoingId ? stepIndexById(redoingId) : -1;
       detail = at >= 0 ? 'replacing step ' + (at + 1) : 'replacing one step';
@@ -389,7 +393,7 @@
     if (!g) return;
     g.textContent = '';
     var looping = steps.some(function (s) { return s.repeat && s.repeat.enabled; });
-    if (mode === 'playing' || mode === 'redo' || mode === 'nextpage') {
+    if (mode === 'playing' || mode === 'redo' || mode === 'nextpage' || mode === 'dismiss') {
       return;                 /* the status header, or the yellow bar, says it */
     }
     if (mode === 'recording') {
@@ -503,6 +507,10 @@
               * changes nothing else about the step, so without it the card
               * would go on saying the loop stops when it no longer does. */
              ':' + (s.repeat && s.repeat.nextPage ? 'n' + (s.repeat.nextPage.selector || '?') : '') +
+             /* So do the missing-step choice and its recorded close button:
+              * the row grows a hint and buttons when the choice changes. */
+             ':' + (s.repeat ? String(s.repeat.onMissing || '') : '') +
+             ':' + (s.repeat && s.repeat.dismiss ? 'd' + (s.repeat.dismiss.selector || '?') : '') +
              ':' + (selected[s.id] ? 's' : '');
     }).join('|') + '#' + mode;
   }
@@ -582,19 +590,6 @@
     delayInput.dataset.role = 'delay';
     delayInput.dataset.id = step.id;
     twoUp.appendChild(makeField('Seconds to wait between clicks', delayInput));
-
-    var missing = document.createElement('select');
-    missing.dataset.fkey = step.id + ':missing';
-    missing.dataset.role = 'missing';
-    missing.dataset.id = step.id;
-    [['stop', 'Stop and tell me'], ['skip', 'Skip it and carry on']].forEach(function (pair) {
-      var opt = document.createElement('option');
-      opt.value = pair[0];
-      opt.textContent = pair[1];
-      if (pair[0] === onMissingOf(step)) opt.selected = true;
-      missing.appendChild(opt);
-    });
-    twoUp.appendChild(makeField('If a step is missing', missing));
     wrap.appendChild(twoUp);
 
     var limits = document.createElement('p');
@@ -695,6 +690,7 @@
       li.appendChild(readout);
 
       li.appendChild(buildNextPageRow(step));
+      li.appendChild(buildMissingRow(step));
     }
 
     /* ---- the steps themselves ---- */
@@ -851,7 +847,7 @@
   }
 
   /* One row on a looping card: what to do when this page has nothing left.
-   * Kept beside the repeat count rather than behind "Match pattern and timing",
+   * Kept beside the repeat count rather than behind "Advanced settings",
    * because carrying on to the next page is an everyday thing to want, not a
    * setting to go hunting for. */
   function buildNextPageRow(step) {
@@ -917,13 +913,87 @@
     return "'" + trunc(name, 30) + "'";
   }
 
+  /* What to do when a step in the pass cannot be found - which, on a list,
+   * usually means the click brought up a pop-up other than the one recorded.
+   * On the card beside the next-page row rather than behind Advanced, because
+   * a pop-up that is not the expected one is the commonest way a long run gets
+   * derailed. */
+  var MISSING_CHOICES = [
+    ['stop', 'stop and tell me'],
+    ['dismiss', 'close the pop-up and move on to the next one'],
+    ['skip', 'skip that step and carry on with the rest']
+  ];
+
+  function buildMissingRow(step) {
+    var row = document.createElement('div');
+    row.className = 'nextpage-bar missing-bar';
+
+    var label = document.createElement('span');
+    label.className = 'nextpage-label';
+    label.textContent = 'If a step is missing:';
+    row.appendChild(label);
+
+    var select = document.createElement('select');
+    select.className = 'missing-select';
+    select.dataset.fkey = step.id + ':missing';
+    select.dataset.role = 'missing';
+    select.dataset.id = step.id;
+    select.setAttribute('aria-label', 'What to do when a step in the pass cannot be found');
+    MISSING_CHOICES.forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      if (pair[0] === onMissingOf(step)) opt.selected = true;
+      select.appendChild(opt);
+    });
+    row.appendChild(select);
+
+    if (onMissingOf(step) === 'dismiss') {
+      var control = step.repeat && step.repeat.dismiss;
+      var how = document.createElement('span');
+      how.className = 'missing-how';
+      how.textContent = control
+        ? 'Closes it by clicking ' + describeControl(control) + ', then Escape or its own Cancel or Close if that fails.'
+        : 'Closes it with Escape, or a Cancel, Close or Dismiss button of its own.';
+      row.appendChild(how);
+
+      var actions = document.createElement('span');
+      actions.className = 'nextpage-actions';
+      var rec = document.createElement('button');
+      rec.type = 'button';
+      rec.className = 'nextpage-btn';
+      rec.dataset.role = 'dismissrec';
+      rec.dataset.id = step.id;
+      rec.textContent = control ? 'Change' : 'Record the button to press';
+      rec.title = 'Bring the pop-up up on the page and click the button that closes it; ' +
+                  'the next click is what gets saved';
+      actions.appendChild(rec);
+      if (control) {
+        var drop = document.createElement('button');
+        drop.type = 'button';
+        drop.className = 'nextpage-btn nextpage-drop';
+        drop.dataset.role = 'cleardismiss';
+        drop.dataset.id = step.id;
+        drop.textContent = 'Remove';
+        drop.title = 'Go back to Escape and the pop-up\'s own Cancel or Close button';
+        actions.appendChild(drop);
+      }
+      row.appendChild(actions);
+    }
+    return row;
+  }
+
   /* ---- the selection bar ---------------------------------------------- */
 
   /* Both capture modes put the same bar up: go and do one thing on the page,
    * or cancel. Only the wording and what the click is kept for differ. */
   function renderRedoBar() {
     var bar = el.redoBar;
-    if (mode !== 'redo' && mode !== 'nextpage') { bar.hidden = true; bar.textContent = ''; return; }
+    if (mode !== 'redo' && mode !== 'nextpage' && mode !== 'dismiss') {
+      bar.hidden = true;
+      bar.textContent = '';
+      return;
+    }
     bar.hidden = false;
     bar.textContent = '';
     var msg = document.createElement('span');
@@ -932,6 +1002,10 @@
       msg.textContent = 'Go to the page and click the control that brings up the next page — ' +
                         'Next, a chevron, "Load more". Scrolling to reach it is fine; the next ' +
                         'thing you click is what gets saved.';
+    } else if (mode === 'dismiss') {
+      msg.textContent = 'Bring that pop-up up on the page and click the button that closes it — ' +
+                        'Cancel, Dismiss, the × in its corner. Scrolling to reach it is fine; the ' +
+                        'next thing you click is what gets saved.';
     } else {
       var at = redoingId ? stepIndexById(redoingId) : -1;
       msg.textContent = at >= 0
@@ -943,7 +1017,8 @@
     var cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.className = 'btn';
-    cancel.dataset.role = mode === 'nextpage' ? 'cancelnextpage' : 'cancelredo';
+    cancel.dataset.role = mode === 'nextpage' ? 'cancelnextpage'
+      : mode === 'dismiss' ? 'canceldismiss' : 'cancelredo';
     cancel.textContent = 'Cancel';
     bar.appendChild(cancel);
   }
@@ -952,6 +1027,7 @@
     var role = e.target && e.target.dataset && e.target.dataset.role;
     if (role === 'cancelredo') actAndReport({ cmd: 'cancelRedo' });
     if (role === 'cancelnextpage') actAndReport({ cmd: 'cancelNextPage' });
+    if (role === 'canceldismiss') actAndReport({ cmd: 'cancelDismiss' });
   });
 
   /* After a step is re-recorded its loop still carries the old element's
@@ -1276,6 +1352,17 @@
       return;
     }
 
+    if (role === 'dismissrec') {
+      undoSnapshot = null;
+      actAndReport({ cmd: 'startDismiss', id: id });
+      return;
+    }
+
+    if (role === 'cleardismiss') {
+      actAndReport({ cmd: 'clearDismiss', id: id });
+      return;
+    }
+
     if (role === 'delete') {
       /* A recording is built by hand and the × has no confirm, so keep the
        * whole list as it was. Snapshotting everything rather than the one step
@@ -1393,9 +1480,8 @@
     if (target.dataset.role === 'missing') {
       var mStep = stepById(target.dataset.id);
       if (!mStep || !mStep.repeat) return;
-      saveRepeat(mStep.id, Object.assign({}, mStep.repeat, {
-        enabled: true, onMissing: target.value === 'skip' ? 'skip' : 'stop'
-      }));
+      var choice = target.value === 'skip' || target.value === 'dismiss' ? target.value : 'stop';
+      saveRepeat(mStep.id, Object.assign({}, mStep.repeat, { enabled: true, onMissing: choice }));
       return;
     }
     if (target.dataset.role === 'select') {
@@ -1438,13 +1524,11 @@
     var step = stepById(target.dataset.id);
     if (!step) return;
     var current = step.repeat || defaultRepeat(step);
-    var updated = {
-      enabled: true,
-      pattern: current.pattern,
-      maxRepeats: current.maxRepeats,
-      delaySeconds: current.delaySeconds,
-      onMissing: current.onMissing === 'skip' ? 'skip' : 'stop'
-    };
+    /* Built on what is there, not from a fixed list of fields: a next-page
+     * control or a close button recorded before this edit has to survive it.
+     * Rebuilding from a list used to drop them the moment the count was
+     * changed. */
+    var updated = Object.assign({}, current, { enabled: true });
 
     if (role === 'pattern') {
       updated.pattern = target.value;

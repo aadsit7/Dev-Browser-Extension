@@ -21,6 +21,7 @@ var RESCUE_LIMIT = 3;          /* scroll-to-load attempts per repeat step */
 var PAGE_TURN_LIMIT = 20;      /* hard ceiling on next-page presses in one run */
 var PAGE_LOAD_TIMEOUT_MS = 15000; /* wait for the next page to bring rows in */
 var DEFAULT_GROUP_SIZE = 1;
+var DISMISS_SAME_LIMIT = 5;    /* the same pop-up this many rows running is not about a row */
 
 var MATCH_LEVEL_TEXT = {
   exact: 'same web address',
@@ -143,11 +144,15 @@ function normalizeRepeat(repeat) {
      * default because a half-finished pass usually means the action never
      * completed - the invitation was never sent, the dialog is still up - and
      * carrying on from there quietly does the wrong thing to every row after. */
-    onMissing: r.onMissing === 'skip' ? 'skip' : 'stop',
+    onMissing: r.onMissing === 'skip' ? 'skip' : r.onMissing === 'dismiss' ? 'dismiss' : 'stop',
     /* An optional control to press when this page has nothing left - Next,
      * a chevron, "Load more". Recorded the same way any click is, so it is
      * found at playback by exactly the same rules. */
-    nextPage: r.nextPage && r.nextPage.selector !== undefined ? r.nextPage : null
+    nextPage: r.nextPage && r.nextPage.selector !== undefined ? r.nextPage : null,
+    /* An optional recorded control for closing a pop-up that is not the one
+     * the pass expects. Without one, Escape and then a Cancel or Close button
+     * of the pop-up's own are tried. */
+    dismiss: r.dismiss && r.dismiss.selector !== undefined ? r.dismiss : null
   };
 }
 
@@ -448,36 +453,68 @@ function startRedo(id) {
   });
 }
 
-/* Record one click and keep it as the loop's next-page control. Same shape as
- * re-recording a step - the user goes and clicks the thing, and the next click
- * is what gets saved - because that is the only way to be sure it is the
- * control they actually mean. */
-function startNextPage(id) {
+/* A loop can carry two recorded controls besides its steps: the one that
+ * brings up the next page, and the one that closes a pop-up that is not the
+ * one the pass expects. Both are captured the same way a step is re-recorded
+ * - the user goes and clicks the thing, and the next click is what gets kept -
+ * because that is the only way to be sure it is the control they actually
+ * mean. The mode name doubles as the capture kind. */
+var CAPTURES = {
+  nextpage: {
+    key: 'nextPageForId',
+    field: 'nextPage',
+    needLoop: 'Turn Loop on first — the next-page control is what the loop presses when the ' +
+              'page runs out.',
+    saved: function (control) {
+      return 'Saved. When the page runs out, the loop will click ' + shortLabel(control) +
+             ' and carry on there.';
+    },
+    cancelled: 'Cancelled — the loop still stops when the page runs out.',
+    removed: 'Next-page control removed — the loop now stops when the page runs out.'
+  },
+  dismiss: {
+    key: 'dismissForId',
+    field: 'dismiss',
+    needLoop: 'Turn Loop on first — the close button is what the loop presses when a different ' +
+              'pop-up comes up.',
+    saved: function (control) {
+      return 'Saved. When a different pop-up comes up, the loop will click ' + shortLabel(control) +
+             ' to close it and move on.';
+    },
+    cancelled: 'Cancelled — a pop-up is still closed with Escape or a Cancel or Close button of its own.',
+    removed: 'Recorded close button removed — a pop-up is closed with Escape or a Cancel or Close ' +
+             'button of its own again.'
+  }
+};
+
+function startCapture(id, kind) {
+  var cap = CAPTURES[kind];
   return getLocal('steps').then(function (d) {
     var steps = Array.isArray(d.steps) ? d.steps : [];
     var at = -1;
     for (var i = 0; i < steps.length; i++) if (steps[i].id === id) { at = i; break; }
     if (at < 0) return { ok: false, error: 'That step is no longer in the recording.' };
-    if (!(steps[at].repeat && steps[at].repeat.enabled)) {
-      return { ok: false, error: 'Turn Loop on first — the next-page control is what the loop ' +
-                                 'presses when the page runs out.' };
-    }
-    return chrome.storage.local.set({ mode: 'nextpage', nextPageForId: id })
+    if (!(steps[at].repeat && steps[at].repeat.enabled)) return { ok: false, error: cap.needLoop };
+    var patch = { mode: kind };
+    patch[cap.key] = id;
+    return chrome.storage.local.set(patch)
       .then(injectIntoAllTabs)
       .then(function () { return notice('', 'info'); })
       .then(function () { return { ok: true }; });
   });
 }
 
-function cancelNextPage() {
-  return chrome.storage.local.set({ mode: 'idle', nextPageForId: null })
-    .then(function () {
-      return notice('Cancelled — the loop still stops when the page runs out.', 'info');
-    })
+function cancelCapture(kind) {
+  var cap = CAPTURES[kind];
+  var patch = { mode: 'idle' };
+  patch[cap.key] = null;
+  return chrome.storage.local.set(patch)
+    .then(function () { return notice(cap.cancelled, 'info'); })
     .then(function () { return { ok: true }; });
 }
 
-function clearNextPage(id) {
+function clearCapture(id, kind) {
+  var cap = CAPTURES[kind];
   return serialize(function () {
     return getLocal('steps').then(function (d) {
       var steps = Array.isArray(d.steps) ? d.steps.slice() : [];
@@ -485,31 +522,32 @@ function clearNextPage(id) {
       for (var i = 0; i < steps.length; i++) if (steps[i].id === id) { at = i; break; }
       if (at < 0) return { ok: false, error: 'That step is no longer in the recording.' };
       if (!steps[at].repeat) return { ok: true };
-      steps[at] = Object.assign({}, steps[at], {
-        repeat: Object.assign({}, steps[at].repeat, { nextPage: null })
-      });
+      var repeat = Object.assign({}, steps[at].repeat);
+      repeat[cap.field] = null;
+      steps[at] = Object.assign({}, steps[at], { repeat: repeat });
       return saveSteps(steps)
-        .then(function () {
-          return notice('Next-page control removed — the loop now stops when the page runs out.', 'info');
-        })
+        .then(function () { return notice(cap.removed, 'info'); })
         .then(function () { return { ok: true }; });
     });
   });
 }
 
-/* Only a click can be a next-page control, and getting to the button often
+/* Only a click can be one of these controls, and getting to the button often
  * means scrolling first, so anything else recorded here is ignored rather than
  * taken as the answer. */
-function applyNextPage(step) {
+function applyCapture(step, kind) {
+  var cap = CAPTURES[kind];
   return serialize(function () {
-    return getLocal(['mode', 'nextPageForId', 'steps']).then(function (s) {
-      if (s.mode !== 'nextpage' || !s.nextPageForId) return { ok: false, error: 'not capturing' };
+    return getLocal(['mode', cap.key, 'steps']).then(function (s) {
+      if (s.mode !== kind || !s[cap.key]) return { ok: false, error: 'not capturing' };
       if (step.type !== 'click') return { ok: true };
       var steps = Array.isArray(s.steps) ? s.steps.slice() : [];
       var at = -1;
-      for (var i = 0; i < steps.length; i++) if (steps[i].id === s.nextPageForId) { at = i; break; }
+      for (var i = 0; i < steps.length; i++) if (steps[i].id === s[cap.key]) { at = i; break; }
+      var reset = { mode: 'idle' };
+      reset[cap.key] = null;
       if (at < 0) {
-        return chrome.storage.local.set({ mode: 'idle', nextPageForId: null })
+        return chrome.storage.local.set(reset)
           .then(function () { return { ok: false, error: 'that step has gone' }; });
       }
       var owner = steps[at];
@@ -522,15 +560,12 @@ function applyNextPage(step) {
         value: '',
         attrs: step.attrs || {}
       };
-      steps[at] = Object.assign({}, owner, {
-        repeat: Object.assign({}, owner.repeat || {}, { nextPage: control })
-      });
-      return chrome.storage.local.set({ mode: 'idle', nextPageForId: null })
+      var repeat = Object.assign({}, owner.repeat || {});
+      repeat[cap.field] = control;
+      steps[at] = Object.assign({}, owner, { repeat: repeat });
+      return chrome.storage.local.set(reset)
         .then(function () { return saveSteps(steps); })
-        .then(function () {
-          return notice('Saved. When the page runs out, the loop will click ' +
-                        shortLabel(control) + ' and carry on there.', 'ok');
-        })
+        .then(function () { return notice(cap.saved(control), 'ok'); })
         .then(function () { return { ok: true }; });
     });
   });
@@ -629,6 +664,11 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
 
 /* --------------------------------------------------------------- playback */
 
+function clip(text, max) {
+  var t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max - 3) + '...' : t;
+}
+
 function shortLabel(step) {
   var name = step.ariaLabel || step.fallbackText || step.selector || step.tagName || 'element';
   if (name.length > 48) name = name.slice(0, 45) + '...';
@@ -669,7 +709,7 @@ function endPlayback(text, kind) {
     var full = notes.length ? text + '\n' + notes.join('\n') : text;
     var level = kind || 'info';
     if (level !== 'error' && notes.some(function (n) {
-      return /not having an effect|No more matching|Stopped by you|same site only|opened a new tab|password/.test(n);
+      return /not having an effect|No more matching|Stopped by you|same site only|opened a new tab|password|passed over|pop-up/.test(n);
     })) {
       level = 'warn';
     }
@@ -771,6 +811,10 @@ function runRepeatPass(step, index, steps, tabId) {
   var missedPasses = 0;
   var skippedFollowers = 0;
   var pageTurns = 0;
+  var passedOver = [];      /* rows given up on because a step was not there */
+  var sameRun = 0;          /* how many rows running the same pop-up has come up on */
+  var lastPopup = null;
+  var previousPassedOver = false;
   /* Scrolling to load more is the right first guess on an endless list, but
    * where a next-page control was recorded the page is paged, not endless -
    * one scroll that reveals nothing settles it, and the rest would be six
@@ -784,9 +828,48 @@ function runRepeatPass(step, index, steps, tabId) {
       text += ' ' + skippedFollowers + ' follow-on step(s) were skipped because the element ' +
               'was not on the page that round.';
     }
+    if (passedOver.length) text += ' ' + passedOverText();
     return addRunNote(text)
       .then(function () { return notice(text, 'info'); })
       .then(function () { return { ok: true }; });
+  }
+
+  /* Which pop-up this was, for telling one from another: its heading with the
+   * numbers taken out, so "3 invitations left" and "2 invitations left" count
+   * as the same box. */
+  function popupKey(heading) {
+    return String(heading == null ? '' : heading).toLowerCase().replace(/\d+/g, '')
+      .replace(/\s+/g, ' ').trim();
+  }
+
+  /* Which rows were given up on, and why, is the part of the summary that
+   * tells the user what their list is actually like. */
+  function passedOverText() {
+    var groups = {};
+    var order = [];
+    var plain = 0;
+    passedOver.forEach(function (p) {
+      if (!p.hadDialog) { plain += 1; return; }
+      var k = popupKey(p.heading);
+      if (!groups[k]) {
+        groups[k] = { heading: p.heading || 'an untitled pop-up', how: p.how, n: 0 };
+        order.push(k);
+      }
+      groups[k].n += 1;
+    });
+    var bits = [];
+    if (order.length) {
+      var parts = order.slice(0, 3).map(function (k) {
+        var g = groups[k];
+        return '"' + clip(g.heading, 60) + '"' + (g.n > 1 ? ' x' + g.n : '') +
+               (g.how ? ' (' + g.how + ')' : '');
+      });
+      if (order.length > 3) parts.push('and ' + (order.length - 3) + ' more');
+      bits.push((passedOver.length - plain) + ' row(s) were passed over because a different ' +
+                'pop-up came up and was closed: ' + parts.join(', ') + '.');
+    }
+    if (plain) bits.push(plain + ' row(s) were passed over because a step was simply not there.');
+    return bits.join(' ');
   }
 
   function stillRunning() {
@@ -820,6 +903,7 @@ function runRepeatPass(step, index, steps, tabId) {
       var strict = cfg.onMissing === 'stop';
       return runFollowerStep(follower, index + 1 + i, strict).then(function (res) {
         if (res && res.ok === false) {
+          if (cfg.onMissing === 'dismiss') return giveUpOnRow(index + 2 + i);
           if (strict) {
             /* The pass did not finish, so the action it was doing did not
              * happen either. Moving to the next element from here would leave
@@ -832,13 +916,79 @@ function runRepeatPass(step, index, steps, tabId) {
         }
         return { ok: true, missed: false };
       }).then(function (res) {
-        if (res.ok === false || res.stopped) return res;
+        if (res.ok === false || res.stopped || res.passedOver) return res;
         return runFollowers(i + 1).then(function (rest) {
-          return { ok: rest.ok, missedStep: rest.missedStep, error: rest.error,
-                   stopped: rest.stopped, missed: res.missed || rest.missed };
+          return Object.assign({}, rest, { missed: res.missed || rest.missed });
         });
       });
     });
+  }
+
+  /* The step is not there. On a list that usually means the click brought up
+   * something other than the pop-up the pass was recorded against - a box
+   * that insists on a note, a notice that a limit was reached - so close
+   * whatever is in the way and give this one row up rather than the run. */
+  function giveUpOnRow(stepNumber) {
+    return ask({ cmd: 'repeatDismiss', pattern: cfg.pattern, control: cfg.dismiss }).then(function (d) {
+      if (!d || d.ok === false) {
+        return { ok: false, missedStep: stepNumber, error: (d && d.error) || 'the page did not answer' };
+      }
+      if (d.hadDialog && !d.dismissed) {
+        return { ok: false, missedStep: stepNumber,
+                 error: 'was not there, and the pop-up in the way ("' + clip(d.heading, 60) +
+                        '") could not be closed' };
+      }
+      return { ok: true, passedOver: true, hadDialog: !!d.hadDialog,
+               heading: d.hadDialog ? String(d.heading || '') : '',
+               how: d.hadDialog ? String(d.how || '') : '' };
+    });
+  }
+
+  /* This row was given up on. Note what came up, watch for the same thing
+   * coming up on every row, and make sure the loop can actually get past it. */
+  function rowGivenUp(res, countBefore) {
+    passedOver.push({ hadDialog: res.hadDialog, heading: res.heading, how: res.how });
+    previousPassedOver = true;
+    var key = res.hadDialog ? popupKey(res.heading) : null;
+    if (key !== null && key === lastPopup) sameRun += 1;
+    else sameRun = key !== null ? 1 : 0;
+    lastPopup = key;
+    if (key !== null && sameRun >= DISMISS_SAME_LIMIT) {
+      return finish('The same pop-up ("' + clip(res.heading, 60) + '") came up on ' + sameRun +
+                    ' rows in a row, so it is about the page or the account rather than any one ' +
+                    'row - stopped after ' + rounds + ' pass(es).');
+    }
+    var note = res.hadDialog
+      ? 'a different pop-up came up ("' + clip(res.heading, 40) + '") - closed it, moving on'
+      : 'a step was not there on this row - moving on';
+    return setPlay({ repeatNote: note }).then(function () {
+      if (useSignatures) return afterPass();
+      /* Without a way to tell the rows apart, this row is still the first
+       * match, and the next round would click it again and get the same
+       * pop-up, round after round. Only carry on if it has gone. */
+      return ask({ cmd: 'repeatProbe', pattern: cfg.pattern }).then(function (p) {
+        if (p && p.ok !== false && typeof p.count === 'number' && p.count < countBefore) return afterPass();
+        return finish('A row was given up on, but the matches on this page cannot be told apart ' +
+                      '(no aria-label, id or name), so the loop cannot move past it - stopped ' +
+                      'after ' + rounds + ' pass(es).');
+      });
+    });
+  }
+
+  /* Only move on once whatever this pass opened has gone away again. */
+  function afterPass() {
+    return ask({ cmd: 'repeatSettle', pattern: cfg.pattern, timeoutMs: SETTLE_TIMEOUT_MS })
+      .then(function (s) {
+        if (s && s.ok !== false && s.settled === false) {
+          return finish('A dialog was still open ' + Math.round(SETTLE_TIMEOUT_MS / 1000) +
+                        ' seconds after pass ' + rounds + ' finished, so the next one would ' +
+                        'have clicked into a covered page. Stopped after ' + rounds + ' pass(es).');
+        }
+        return sleepInterruptible(cfg.delayMs).then(function (running2) {
+          if (!running2) return finish('Stopped by you after ' + rounds + ' pass(es).');
+          return round();
+        });
+      });
   }
 
   /* The list on this page is finished. With a next-page control recorded, press
@@ -919,7 +1069,9 @@ function runRepeatPass(step, index, steps, tabId) {
          * every match and changed none of them is a page ignoring clicks, not
          * a list that ran out. */
         if (useSignatures) {
-          if (out.previousUnchanged) noEffect += 1;
+          /* A pop-up that had to be closed is proof the click did something,
+           * even though the row it was on looks exactly as it did. */
+          if (out.previousUnchanged && !previousPassedOver) noEffect += 1;
           else noEffect = 0;
           if (noEffect >= STALL_LIMIT) {
             return finish('Clicks are not having an effect — stopped after ' + rounds + ' rounds.');
@@ -978,8 +1130,13 @@ function runRepeatPass(step, index, steps, tabId) {
                           ' (' + shortLabel(steps[res.missedStep - 1] || {}) + ') ' + res.error +
                           '. Stopped rather than leaving that one half-done and carrying on. ' +
                           'Give the page longer, check that step\'s target, or set "If a step is ' +
-                          'missing" to skip it if it is genuinely optional.');
+                          'missing" to close the pop-up and move on if the click sometimes brings ' +
+                          'up something else.');
           }
+          if (res.passedOver) return rowGivenUp(res, out.countBefore);
+          previousPassedOver = false;
+          sameRun = 0;
+          lastPopup = null;
           if (followers.length) {
             /* Every follow-on step missing, pass after pass, means the flow has
              * broken rather than that one row was unusual. */
@@ -990,19 +1147,7 @@ function runRepeatPass(step, index, steps, tabId) {
                             'behaving the way it did when you recorded. Stopped after ' + rounds + ' passes.');
             }
           }
-          /* Only move on once whatever this pass opened has gone away again. */
-          return ask({ cmd: 'repeatSettle', pattern: cfg.pattern, timeoutMs: SETTLE_TIMEOUT_MS })
-            .then(function (s) {
-              if (s && s.ok !== false && s.settled === false) {
-                return finish('A dialog was still open ' + Math.round(SETTLE_TIMEOUT_MS / 1000) +
-                              ' seconds after pass ' + rounds + ' finished, so the next one would ' +
-                              'have clicked into a covered page. Stopped after ' + rounds + ' pass(es).');
-              }
-              return sleepInterruptible(cfg.delayMs).then(function (running2) {
-                if (!running2) return finish('Stopped by you after ' + rounds + ' pass(es).');
-                return round();
-              });
-            });
+          return afterPass();
         });
       });
     });
@@ -1413,8 +1558,9 @@ function cleanRepeat(r) {
     pattern: cleanText(r.pattern, 2000),
     maxRepeats: Math.round(clamp(r.maxRepeats == null ? DEFAULT_MAX_REPEATS : r.maxRepeats, 1, MAX_REPEATS_CEILING)),
     delaySeconds: clamp(r.delaySeconds == null ? DEFAULT_DELAY_SECONDS : r.delaySeconds, DELAY_FLOOR_MS / 1000, 600),
-    onMissing: r.onMissing === 'skip' ? 'skip' : 'stop',
-    nextPage: cleanControl(r.nextPage)
+    onMissing: r.onMissing === 'skip' ? 'skip' : r.onMissing === 'dismiss' ? 'dismiss' : 'stop',
+    nextPage: cleanControl(r.nextPage),
+    dismiss: cleanControl(r.dismiss)
   };
   if (r.groupSize > 0) out.groupSize = Math.round(clamp(r.groupSize, 1, 50));
   return out;
@@ -1590,13 +1736,22 @@ function handleMessage(msg, sender) {
       return startRedo(msg.id);
 
     case 'startNextPage':
-      return startNextPage(msg.id);
+      return startCapture(msg.id, 'nextpage');
 
     case 'cancelNextPage':
-      return cancelNextPage();
+      return cancelCapture('nextpage');
 
     case 'clearNextPage':
-      return clearNextPage(msg.id);
+      return clearCapture(msg.id, 'nextpage');
+
+    case 'startDismiss':
+      return startCapture(msg.id, 'dismiss');
+
+    case 'cancelDismiss':
+      return cancelCapture('dismiss');
+
+    case 'clearDismiss':
+      return clearCapture(msg.id, 'dismiss');
 
     case 'cancelRedo':
       return cancelRedo();
@@ -1697,7 +1852,7 @@ function handleMessage(msg, sender) {
 
     case 'recordStep':
       return getLocal('mode').then(function (d) {
-        if (d.mode !== 'recording' && d.mode !== 'redo' && d.mode !== 'nextpage') {
+        if (d.mode !== 'recording' && d.mode !== 'redo' && !CAPTURES[d.mode]) {
           return { ok: false, error: 'not recording' };
         }
         var step = msg.step || {};
@@ -1707,7 +1862,7 @@ function handleMessage(msg, sender) {
         step.title = (sender && sender.tab && sender.tab.title) || step.title || hostOf(step.url);
         if (!step.repeat) step.repeat = null;
         if (d.mode === 'redo') return applyRedo(step);
-        if (d.mode === 'nextpage') return applyNextPage(step);
+        if (CAPTURES[d.mode]) return applyCapture(step, d.mode);
         var key = msg.coalesceKey ? msg.coalesceKey + '@' + step.url : null;
         /* One serialized job, so the "switched to tab" step can never land
          * after the action that provoked it. */
