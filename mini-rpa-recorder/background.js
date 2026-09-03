@@ -17,6 +17,7 @@ var STALL_LIMIT = 3;           /* rounds with no progress before giving up */
 var FOLLOWER_TIMEOUT_MS = 5000;  /* per follow-on step when misses are skipped */
 var FOLLOWER_STRICT_MS = 10000; /* per follow-on step when a miss stops the run */
 var SETTLE_TIMEOUT_MS = 8000;   /* wait for a dialog to clear between passes */
+var WATCH_MS = 1500;            /* how long a click gets to show an effect before a second try */
 var RESCUE_LIMIT = 3;          /* scroll-to-load attempts per repeat step */
 var PAGE_TURN_LIMIT = 20;      /* hard ceiling on next-page presses in one run */
 var PAGE_LOAD_TIMEOUT_MS = 15000; /* wait for the next page to bring rows in */
@@ -190,7 +191,7 @@ chrome.runtime.onInstalled.addListener(function () {
   initPanelBehaviour();
   getLocal(['mode', 'steps', 'library']).then(function (d) {
     var patch = {};
-    if (d.mode !== 'recording' && d.mode !== 'playing') patch.mode = 'idle';
+    if (d.mode !== 'recording' && d.mode !== 'playing') { patch.mode = 'idle'; patch.addSpec = null; }
     if (!Array.isArray(d.steps)) patch.steps = [];
     if (!Array.isArray(d.library)) patch.library = [];
     if (Object.keys(patch).length) chrome.storage.local.set(patch);
@@ -353,6 +354,33 @@ function appendStep(step, coalesceKey) {
   return serialize(function () { return appendStepRaw(step, coalesceKey); });
 }
 
+/* Takes one step out, shrinking any set that covered it. Leaving the size
+ * alone would silently pull in whatever step slid up into the gap - on a
+ * looping set, an extra action on every single pass. Answers the same array
+ * when the step is not there. */
+function removeStep(steps, id) {
+  var gone = -1;
+  for (var k = 0; k < steps.length; k++) if (steps[k].id === id) { gone = k; break; }
+  if (gone < 0) return steps;
+  var out = steps.slice();
+  for (var i = 0; i < out.length; i++) {
+    if (i === gone) continue;
+    var size = rawSetSize(out[i]);
+    if (size < 2) continue;
+    if (gone > i && gone < i + size) {
+      var shrunk = size - 1;
+      var stillLoops = !!(out[i].repeat && out[i].repeat.enabled);
+      out[i] = Object.assign({}, out[i], {
+        set: (shrunk < 2 && !stillLoops)
+          ? null
+          : Object.assign({}, out[i].set || {}, { size: shrunk })
+      });
+    }
+  }
+  out.splice(gone, 1);
+  return out;
+}
+
 function switchStepFor(tab) {
   return {
     id: uid(),
@@ -434,7 +462,7 @@ function injectIntoAllTabs() {
 }
 
 function startRecording() {
-  return chrome.storage.local.set({ mode: 'recording', skipped: [], redoStepId: null })
+  return chrome.storage.local.set({ mode: 'recording', skipped: [], redoStepId: null, addSpec: null })
     .then(function () { return chrome.storage.session.set({ play: null }); })
     .then(getActiveTab)
     .then(function (active) {
@@ -586,6 +614,194 @@ function applyCapture(step, kind) {
   });
 }
 
+/* ---- adding one step from the catalog ---------------------------------- */
+
+/* The panel's catalog adds a step at a chosen place in the flow. For a
+ * click, a key or a scroll the user goes and does it on the page, and the
+ * next action of that kind is what goes in; typing and scrolling arrive as
+ * a stream, so those two carry on until the user says they are done. */
+var ADD_KINDS = { click: 1, input: 1, key: 1, scroll: 1 };
+var DIRECT_TYPES = { wait: 1, goto: 1 };
+
+function findIndex(steps, id) {
+  for (var i = 0; i < steps.length; i++) if (steps[i].id === id) return i;
+  return -1;
+}
+
+/* One more step went into a block: its anchor's set grows to cover it. */
+function growSet(steps, anchorId) {
+  var at = findIndex(steps, anchorId);
+  if (at < 0) return steps;
+  var out = steps.slice();
+  out[at] = Object.assign({}, out[at], {
+    set: Object.assign({ name: '', collapsed: false }, out[at].set || {}, { size: rawSetSize(out[at]) + 1 })
+  });
+  return out;
+}
+
+function insertStep(steps, step, index, blockAnchorId) {
+  var out = steps.slice();
+  var at = Math.round(clamp(index == null ? out.length : index, 0, out.length));
+  out.splice(at, 0, step);
+  if (blockAnchorId) {
+    var anchorAt = findIndex(out, blockAnchorId);
+    /* Only a place inside the block can grow it: right after its anchor up
+     * to right after its last step. */
+    if (anchorAt >= 0 && at > anchorAt && at <= anchorAt + rawSetSize(out[anchorAt])) {
+      out = growSet(out, blockAnchorId);
+    }
+  }
+  return { steps: out, at: at };
+}
+
+function startAdd(spec) {
+  spec = spec || {};
+  var kinds = (Array.isArray(spec.kinds) ? spec.kinds : []).filter(function (k) { return ADD_KINDS[k]; });
+  if (!kinds.length) return Promise.resolve({ ok: false, error: 'Nothing to capture.' });
+  return getLocal('steps').then(function (d) {
+    var steps = Array.isArray(d.steps) ? d.steps : [];
+    var anchorId = spec.blockAnchorId && findIndex(steps, spec.blockAnchorId) >= 0 ? spec.blockAnchorId : null;
+    var addSpec = {
+      kinds: kinds,
+      index: Math.round(clamp(spec.index == null ? steps.length : spec.index, 0, steps.length)),
+      blockAnchorId: anchorId,
+      makeRepeat: !!spec.makeRepeat && kinds[0] === 'click',
+      insertedId: null
+    };
+    return chrome.storage.local.set({ mode: 'add', addSpec: addSpec })
+      .then(injectIntoAllTabs)
+      .then(function () { return notice('', 'info'); })
+      .then(function () { return { ok: true }; });
+  });
+}
+
+function addedNotice(steps, at) {
+  return notice('Added step ' + (at + 1) + ': ' + shortLabel(steps[at]) + '.', 'ok');
+}
+
+function applyAdd(step, coalesceKey) {
+  return serialize(function () {
+    return getLocal(['mode', 'addSpec', 'steps']).then(function (s) {
+      var spec = s.addSpec;
+      if (s.mode !== 'add' || !spec) return { ok: false, error: 'not adding a step' };
+      /* A scroll on the way to a button, or the click into a box before
+       * typing, is not the step being added. */
+      if (spec.kinds.indexOf(step.type) === -1) return { ok: true };
+      var steps = Array.isArray(s.steps) ? s.steps.slice() : [];
+      var streamed = step.type === 'input' || step.type === 'scroll';
+      var fresh = Object.assign({}, step, {
+        coalesceKey: coalesceKey ? coalesceKey + '@' + step.url : null,
+        set: null
+      });
+      var at = spec.insertedId ? findIndex(steps, spec.insertedId) : -1;
+      if (at >= 0) {
+        /* More of the same stream: the rest of the word, the rest of the scroll. */
+        steps[at] = Object.assign({}, fresh, { id: steps[at].id, timestamp: steps[at].timestamp });
+      } else {
+        if (spec.makeRepeat && step.type === 'click') {
+          fresh.repeat = {
+            enabled: true, pattern: '', maxRepeats: DEFAULT_MAX_REPEATS,
+            delaySeconds: DEFAULT_DELAY_SECONDS, onMissing: 'stop'
+          };
+          /* The panel works the pattern out from the element, as after a re-record. */
+          fresh.needsPattern = true;
+        }
+        var put = insertStep(steps, fresh, spec.index, spec.blockAnchorId);
+        steps = put.steps;
+        at = put.at;
+      }
+      var patch = streamed
+        ? { addSpec: Object.assign({}, spec, { insertedId: steps[at].id }) }
+        : { mode: 'idle', addSpec: null };
+      return chrome.storage.local.set(patch)
+        .then(function () { return saveSteps(steps); })
+        .then(function () { return streamed ? null : addedNotice(steps, at); })
+        .then(function () { return { ok: true }; });
+    });
+  });
+}
+
+/* Done, for the streamed kinds. With nothing captured yet it is the same as
+ * cancelling. */
+function finishAdd() {
+  return serialize(function () {
+    return getLocal(['mode', 'addSpec', 'steps']).then(function (s) {
+      var spec = s.addSpec;
+      var steps = Array.isArray(s.steps) ? s.steps : [];
+      var at = spec && spec.insertedId ? findIndex(steps, spec.insertedId) : -1;
+      return chrome.storage.local.set({ mode: 'idle', addSpec: null }).then(function () {
+        if (s.mode !== 'add') return null;
+        return at >= 0 ? addedNotice(steps, at) : notice('Nothing was added.', 'info');
+      }).then(function () { return { ok: true }; });
+    });
+  });
+}
+
+function cancelAdd() {
+  return serialize(function () {
+    return getLocal(['mode', 'addSpec', 'steps']).then(function (s) {
+      var spec = s.addSpec;
+      var steps = Array.isArray(s.steps) ? s.steps : [];
+      var next = spec && spec.insertedId ? removeStep(steps, spec.insertedId) : steps;
+      return chrome.storage.local.set({ mode: 'idle', addSpec: null })
+        .then(function () { return next === steps ? null : saveSteps(next); })
+        .then(function () { return notice('Cancelled - nothing was added.', 'info'); })
+        .then(function () { return { ok: true }; });
+    });
+  });
+}
+
+/* Steps that need nothing from the page - a wait, opening an address - go
+ * straight in, stamped with the page in front so they run on that tab. */
+function addStepDirect(msg) {
+  var raw = msg && msg.step;
+  if (!raw || !DIRECT_TYPES[raw.type]) {
+    return Promise.resolve({ ok: false, error: 'That kind of step cannot be added this way.' });
+  }
+  return getActiveTab().then(function (tab) {
+    var step = {
+      id: uid(),
+      type: raw.type,
+      selector: '', tagName: '', ariaLabel: '', fallbackText: '',
+      value: raw.type === 'goto' ? normalizeAddress(raw.value) : cleanText(raw.value, 40),
+      attrs: { id: '', testId: '', name: '', type: '' },
+      url: (tab && tab.url) || '',
+      title: (tab && (tab.title || hostOf(tab.url))) || '',
+      timestamp: Date.now(),
+      repeat: null,
+      coalesceKey: null
+    };
+    return serialize(function () {
+      return getLocal('steps').then(function (d) {
+        var steps = Array.isArray(d.steps) ? d.steps : [];
+        var put = insertStep(steps, step, msg.index, msg.blockAnchorId);
+        return saveSteps(put.steps)
+          .then(function () { return addedNotice(put.steps, put.at); })
+          .then(function () { return { ok: true, id: step.id, index: put.at }; });
+      });
+    });
+  });
+}
+
+/* An address typed without a scheme is meant as a web address. */
+function normalizeAddress(value) {
+  var url = cleanText(value, 4000);
+  if (url && !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = 'https://' + url;
+  return url;
+}
+
+/* "Open a page": the tab the step belongs to is sent to the address, and the
+ * step is done once the page has loaded. */
+function openPage(tabId, address) {
+  var url = normalizeAddress(address);
+  if (!url) return Promise.resolve({ ok: false, error: 'the step has no web address to open' });
+  if (!isInjectable(url)) return Promise.resolve({ ok: false, error: 'only http and https addresses can be opened' });
+  return chrome.tabs.update(tabId, { url: url })
+    .then(function () { return waitForTabLoad(tabId); })
+    .then(function () { return { ok: true }; })
+    .catch(function (e) { return { ok: false, error: errText(e) }; });
+}
+
 function cancelRedo() {
   return chrome.storage.local.set({ mode: 'idle', redoStepId: null })
     .then(function () { return notice('Re-recording cancelled — the step is unchanged.', 'info'); })
@@ -695,6 +911,8 @@ function shortLabel(step) {
     case 'scroll': return 'scroll';
     case 'switchTab': return 'switch to ' + (step.title || hostOf(step.url));
     case 'screenshot': return 'screenshot (skipped)';
+    case 'wait': return 'wait ' + (Number(step.value) || 0) + ' second' + (Number(step.value) === 1 ? '' : 's');
+    case 'goto': return 'open ' + hostOf(step.value);
     default: return step.type;
   }
 }
@@ -767,14 +985,20 @@ function noteMatchLevel(step, index, level) {
 }
 
 function runOneStep(step, index) {
+  /* A wait needs no page at all. */
+  if (step.type === 'wait') {
+    var ms = clamp(Math.round(Number(step.value) * 1000), 0, 600000);
+    return sleepInterruptible(ms).then(function () { return { ok: true }; });
+  }
   return resolveTab(step.url, step.title).then(function (resolved) {
     return noteMatchLevel(step, index, resolved.level).then(function () {
       return setPlay({ matchLevel: MATCH_LEVEL_TEXT[resolved.level] || resolved.level });
     }).then(function () {
       if (step.type === 'switchTab') return { ok: true };
+      if (step.type === 'goto') return openPage(resolved.tabId, step.value);
       return ensureContentScript(resolved.tabId).then(function () {
         return sendToTab(resolved.tabId, {
-          cmd: 'playStep', step: step,
+          cmd: 'playStep', step: step, watch: !!step.__watch,
           timeoutMs: step.__passFollower === 'strict' ? FOLLOWER_STRICT_MS
                    : step.__passFollower === 'lenient' ? FOLLOWER_TIMEOUT_MS : 0
         }).then(function (out) {
@@ -796,11 +1020,12 @@ function runOneStep(step, index) {
 
 /* One step of a repeat pass, run the ordinary way but with any repeat setting
  * stripped so a pass can never nest inside itself. */
-function runFollowerStep(step, index, strict) {
+function runFollowerStep(step, index, strict, watch) {
   if (step.type === 'screenshot') return Promise.resolve({ ok: true, skipped: true });
   return runOneStep(Object.assign({}, step, {
     repeat: null,
-    __passFollower: strict ? 'strict' : 'lenient'
+    __passFollower: strict ? 'strict' : 'lenient',
+    __watch: !!watch
   }), index).catch(function (e) { return { ok: false, error: errText(e) }; });
 }
 
@@ -833,6 +1058,9 @@ function runRepeatPass(step, index, steps, tabId) {
   var tabTitle = '';        /* which tab the pass is running on, for the summary */
   var lastLabel = '';       /* what the last round clicked, for the summary */
   var healedUsed = '';      /* the widened pattern, when the recorded one found nothing */
+  var lastPassPopup = false; /* the previous pass brought up a pop-up that then went away */
+  var trace = [];           /* what each round saw: the click's effect, the pop-up, the steps in it */
+  var cur = null;           /* the round under way */
   /* Scrolling to load more is the right first guess on an endless list, but
    * where a next-page control was recorded the page is paged, not endless -
    * one scroll that reveals nothing settles it, and the rest would be six
@@ -905,19 +1133,67 @@ function runRepeatPass(step, index, steps, tabId) {
    * means, rather than leaving them to guess. */
   function stallText() {
     var what = lastLabel ? '"' + clip(lastLabel, 40) + '"' : 'the matching element';
-    var text = 'Clicks are not having an effect — stopped after ' + rounds + ' rounds. Each round clicked ' +
-               what + (tabTitle ? ' on the tab "' + clip(tabTitle, 40) + '"' : '') +
-               (followers.length
-                 ? ' and then ran the ' + followers.length + ' step' + (followers.length === 1 ? '' : 's') +
-                   ' after it'
-                 : '') +
-               ', and the element looked exactly the same afterwards. That happens when the page ignores ' +
-               'simulated clicks, when the pop-up the next step needs did not open, or when the run is on ' +
-               'a different tab from the one you are looking at.';
+    var where = tabTitle ? ' on the tab "' + clip(tabTitle, 40) + '"' : '';
+    var after = followers.length
+      ? ' the ' + followers.length + ' step' + (followers.length === 1 ? '' : 's') + ' after it'
+      : '';
+    var recent = trace.slice(-STALL_LIMIT);
+    var dead = recent.length > 0 && recent.every(function (r) { return r.anchor === ''; });
+    var popups = recent.length > 0 && recent.every(function (r) { return r.popup; });
+    var head = 'Clicks are not having an effect — stopped after ' + rounds + ' rounds. ';
+    var text;
+    if (dead) {
+      text = head + 'Clicking ' + what + where + ' opened nothing and changed nothing, even when it was ' +
+             'clicked a second time. The page is ignoring simulated clicks on it: check that the run is ' +
+             'on the tab you are looking at, and re-record that step.';
+    } else if (popups) {
+      text = head + 'Each round clicked ' + what + where + ', the pop-up came up and went away again' +
+             (after ? ' once' + after + ' ran' : '') + ', and yet ' +
+             (useSignatures ? 'the element looked exactly the same afterwards'
+                            : 'the number of matching elements never went down') +
+             '. The site is taking the clicks but not changing the rows: a limit may have been reached, ' +
+             'or the list only updates on reload. Look at the page to see what the rows say now.';
+    } else {
+      text = head + 'Each round clicked ' + what + where + (after ? ' and then ran' + after : '') +
+             ', and the element looked exactly the same afterwards' +
+             (followers.length ? ', with no pop-up seen' : '') +
+             '. That happens when the page ignores simulated clicks, when the pop-up the next step needs ' +
+             'did not open, or when the run is on a different tab from the one you are looking at.';
+    }
     if (healedUsed) {
       text += ' The match pattern found nothing as written and was widened to ' + healedUsed + '.';
     }
     return text;
+  }
+
+  /* The pop-up the pass brought up is still there after its steps ran. Which
+   * step failed to close it, and whether the page reacted to that click at
+   * all, is what the user needs to know. */
+  function stuckText(s) {
+    var secs = Math.round(SETTLE_TIMEOUT_MS / 1000);
+    var name = s.heading ? 'The pop-up "' + clip(s.heading, 50) + '"' : 'A pop-up';
+    var last = cur && cur.followers.length ? cur.followers[cur.followers.length - 1] : null;
+    var text = name + ' was still open ' + secs + ' seconds after pass ' + rounds + ' finished';
+    if (last && last.reaction === '') {
+      text += ': clicking "' + clip(last.label, 40) + '" in it did nothing, even on a second try. The page ' +
+              'is ignoring simulated clicks on that button - re-record that step, and check whether the ' +
+              'pop-up now asks for something first.';
+    } else if (last) {
+      text += ': the steps in it ran, but it did not close. It may need something else first - a note, ' +
+              'a choice - which one round done by hand will show.';
+    } else {
+      text += ', so the next pass would have clicked into a covered page.';
+    }
+    return text + ' Stopped after ' + rounds + ' pass(es).';
+  }
+
+  /* What the click just made did to the page. A page that stops answering
+   * has navigated, which is an effect too. */
+  function watchClick() {
+    return ask({ cmd: 'repeatWatch', timeoutMs: WATCH_MS }).then(function (w) {
+      if (!w || w.ok === false) return { reaction: 'navigated', retried: false, label: '' };
+      return { reaction: w.reaction || '', retried: !!w.retried, label: w.label || '' };
+    });
   }
 
   /* The recorded pattern found nothing, but the same identity on another
@@ -955,7 +1231,20 @@ function runRepeatPass(step, index, steps, tabId) {
       if (!running) return { ok: true, stopped: true };
       var follower = followers[i];
       var strict = cfg.onMissing === 'stop';
-      return runFollowerStep(follower, index + 1 + i, strict).then(function (res) {
+      var watched = follower.type === 'click';
+      return runFollowerStep(follower, index + 1 + i, strict, watched).then(function (res) {
+        if (!watched || !res || res.ok === false || res.skipped) return res;
+        /* What that click did - for the summary, should the pop-up stay up. */
+        return watchClick().then(function (w) {
+          if (cur) {
+            cur.followers.push({
+              label: clip(follower.fallbackText || follower.ariaLabel || shortLabel(follower), 40),
+              reaction: w.reaction, retried: w.retried
+            });
+          }
+          return res;
+        });
+      }).then(function (res) {
         if (res && res.ok === false) {
           if (cfg.onMissing === 'dismiss') return giveUpOnRow(index + 2 + i);
           if (strict) {
@@ -1033,11 +1322,11 @@ function runRepeatPass(step, index, steps, tabId) {
   function afterPass() {
     return ask({ cmd: 'repeatSettle', pattern: cfg.pattern, timeoutMs: SETTLE_TIMEOUT_MS })
       .then(function (s) {
-        if (s && s.ok !== false && s.settled === false) {
-          return finish('A dialog was still open ' + Math.round(SETTLE_TIMEOUT_MS / 1000) +
-                        ' seconds after pass ' + rounds + ' finished, so the next one would ' +
-                        'have clicked into a covered page. Stopped after ' + rounds + ' pass(es).');
+        if (s && s.ok !== false) {
+          lastPassPopup = !!(s.popup && s.popupGone);
+          if (cur) { cur.popup = !!s.popup; cur.gone = !!s.popupGone; }
         }
+        if (s && s.ok !== false && s.settled === false) return finish(stuckText(s));
         return sleepInterruptible(cfg.delayMs).then(function (running2) {
           if (!running2) return finish('Stopped by you after ' + rounds + ' pass(es).');
           return round();
@@ -1124,8 +1413,9 @@ function runRepeatPass(step, index, steps, tabId) {
          * a list that ran out. */
         if (useSignatures) {
           /* A pop-up that had to be closed is proof the click did something,
-           * even though the row it was on looks exactly as it did. */
-          if (out.previousUnchanged && !previousPassedOver) noEffect += 1;
+           * even though the row it was on looks exactly as it did - and so is
+           * a pop-up that came up and went away again as the pass ran. */
+          if (out.previousUnchanged && !previousPassedOver && !lastPassPopup) noEffect += 1;
           else noEffect = 0;
           if (noEffect >= STALL_LIMIT) return finish(stallText());
         }
@@ -1169,21 +1459,34 @@ function runRepeatPass(step, index, steps, tabId) {
         rounds += 1;
         if (out.signature) handled.push(out.signature);
         previous = out.signature ? { signature: out.signature, state: out.state } : null;
+        cur = { anchor: null, retried: false, popup: false, gone: false, followers: [] };
+        trace.push(cur);
 
         return setPlay({
           repeatCount: rounds, repeatMax: cfg.maxRepeats,
           repeatRemaining: Math.max(0, out.countBefore - 1), repeatNote: ''
-        }).then(function () {
+        }).then(watchClick).then(function (w) {
+          cur.anchor = w.reaction;
+          cur.retried = w.retried;
           return runFollowers(0);
         }).then(function (res) {
           if (res.stopped) return finish('Stopped by you after ' + rounds + ' pass(es).');
           if (res.ok === false) {
-            return finish('Pass ' + rounds + ' could not finish - step ' + res.missedStep +
+            /* A click that did nothing at all is the reason the next step
+             * had nothing to work on, so it comes first. */
+            var because = cur.anchor === ''
+              ? 'Clicking "' + clip(lastLabel || 'the element', 40) + '" did nothing on the page - no pop-up ' +
+                'opened and nothing changed, even on a second try - so step ' + res.missedStep +
+                ' had nothing to act on. '
+              : '';
+            return finish(because + 'Pass ' + rounds + ' could not finish - step ' + res.missedStep +
                           ' (' + shortLabel(steps[res.missedStep - 1] || {}) + ') ' + res.error +
                           '. Stopped rather than leaving that one half-done and carrying on. ' +
-                          'Give the page longer, check that step\'s target, or set "If a step is ' +
-                          'missing" to close the pop-up and move on if the click sometimes brings ' +
-                          'up something else.');
+                          (because
+                            ? 'Check that the run is on the tab you are looking at, and re-record the click.'
+                            : 'Give the page longer, check that step\'s target, or set "If a step is ' +
+                              'missing" to close the pop-up and move on if the click sometimes brings ' +
+                              'up something else.'));
           }
           if (res.passedOver) return rowGivenUp(res, out.countBefore);
           previousPassedOver = false;
@@ -1413,7 +1716,7 @@ function takeScreenshot() {
  * read every screenshot ever saved just to show the names. `loadedFrom` says
  * which saved recording the working steps came from, if any. */
 
-var STEP_TYPES = { click: 1, input: 1, change: 1, key: 1, scroll: 1, switchTab: 1, screenshot: 1 };
+var STEP_TYPES = { click: 1, input: 1, change: 1, key: 1, scroll: 1, switchTab: 1, screenshot: 1, wait: 1, goto: 1 };
 var LIBRARY_NAME_MAX = 80;
 var IMPORT_STEP_LIMIT = 500;
 
@@ -1775,7 +2078,7 @@ function handleMessage(msg, sender) {
   switch (msg && msg.cmd) {
     case 'getState':
       return Promise.all([
-        getLocal(['mode', 'steps', 'notice', 'skipped', 'library', 'loadedFrom']),
+        getLocal(['mode', 'steps', 'notice', 'skipped', 'library', 'loadedFrom', 'addSpec']),
         getPlay()
       ]).then(function (r) {
         return { ok: true, local: r[0], play: r[1] };
@@ -1830,31 +2133,40 @@ function handleMessage(msg, sender) {
     case 'deleteStep':
       return serialize(function () {
         return getLocal('steps').then(function (d) {
-          var steps = Array.isArray(d.steps) ? d.steps.slice() : [];
-          var gone = -1;
-          for (var k = 0; k < steps.length; k++) if (steps[k].id === msg.id) { gone = k; break; }
-          if (gone < 0) return { ok: true };
+          var steps = Array.isArray(d.steps) ? d.steps : [];
+          var next = removeStep(steps, msg.id);
+          if (next === steps) return { ok: true };
+          return saveSteps(next).then(function () { return { ok: true }; });
+        });
+      });
 
-          /* A set that covered the deleted step has to shrink with it.
-           * Leaving the size alone would silently pull in whatever step slid
-           * up into the gap - on a looping set, an extra action on every
-           * single pass. */
-          for (var i = 0; i < steps.length; i++) {
-            if (i === gone) continue;
-            var size = rawSetSize(steps[i]);
-            if (size < 2) continue;
-            if (gone > i && gone < i + size) {
-              var shrunk = size - 1;
-              var stillLoops = !!(steps[i].repeat && steps[i].repeat.enabled);
-              steps[i] = Object.assign({}, steps[i], {
-                set: (shrunk < 2 && !stillLoops)
-                  ? null
-                  : Object.assign({}, steps[i].set || {}, { size: shrunk })
-              });
-            }
-          }
-          steps.splice(gone, 1);
-          return saveSteps(steps).then(function () { return { ok: true }; });
+    case 'startAdd':
+      return startAdd(msg.spec);
+
+    case 'finishAdd':
+      return finishAdd();
+
+    case 'cancelAdd':
+      return cancelAdd();
+
+    case 'addStep':
+      return addStepDirect(msg);
+
+    /* The one thing a wait or an open-a-page step carries is its value; the
+     * address is tidied only once the user has finished typing it. */
+    case 'setValue':
+      return serialize(function () {
+        return getLocal('steps').then(function (d) {
+          var steps = Array.isArray(d.steps) ? d.steps.slice() : [];
+          var at = findIndex(steps, msg.id);
+          if (at < 0) return { ok: false, error: 'That step is no longer in the flow.' };
+          var s = steps[at];
+          if (!DIRECT_TYPES[s.type]) return { ok: false, error: 'Only a wait or an open-a-page step can be edited this way.' };
+          var value = s.type === 'goto'
+            ? (msg.final ? normalizeAddress(msg.value) : cleanText(msg.value, 4000))
+            : (msg.final ? String(clamp(Number(msg.value), 0, 600)) : cleanText(msg.value, 12));
+          steps[at] = Object.assign({}, s, { value: value });
+          return saveSteps(steps).then(function () { return { ok: true, value: value }; });
         });
       });
 
@@ -1921,7 +2233,7 @@ function handleMessage(msg, sender) {
 
     case 'recordStep':
       return getLocal('mode').then(function (d) {
-        if (d.mode !== 'recording' && d.mode !== 'redo' && !CAPTURES[d.mode]) {
+        if (d.mode !== 'recording' && d.mode !== 'redo' && d.mode !== 'add' && !CAPTURES[d.mode]) {
           return { ok: false, error: 'not recording' };
         }
         var step = msg.step || {};
@@ -1931,6 +2243,7 @@ function handleMessage(msg, sender) {
         step.title = (sender && sender.tab && sender.tab.title) || step.title || hostOf(step.url);
         if (!step.repeat) step.repeat = null;
         if (d.mode === 'redo') return applyRedo(step);
+        if (d.mode === 'add') return applyAdd(step, msg.coalesceKey);
         if (CAPTURES[d.mode]) return applyCapture(step, d.mode);
         var key = msg.coalesceKey ? msg.coalesceKey + '@' + step.url : null;
         /* One serialized job, so the "switched to tab" step can never land

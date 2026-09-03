@@ -35,8 +35,8 @@
     sizeWarn: document.getElementById('sizeWarn'),
     flow: document.getElementById('flow'),
     flowHint: document.getElementById('flowHint'),
-    empty: document.getElementById('emptyMsg'),
-    guide: document.getElementById('guide'),
+    help: document.getElementById('help'),
+    btnHelp: document.getElementById('btnHelp'),
     count: document.getElementById('stepCount'),
     redoBar: document.getElementById('redoBar'),
     drawer: document.getElementById('drawer'),
@@ -65,6 +65,8 @@
   var redoingId = null;       /* the step currently being re-recorded */
   var selection = null;       /* { id, view: 'step' | 'block' } - what the drawer shows */
   var drag = null;            /* { kind: 'step' | 'block', id } while a card is in the air */
+  var addSpec = null;         /* what the "add a step" capture is waiting for */
+  var pendingOpen = null;     /* a step to open in the drawer as soon as it is in the flow */
 
   /* ------------------------------------------------------------ messaging */
 
@@ -128,6 +130,24 @@
     return (step.tagName || 'field') + " '" + trunc(name, 30) + "'";
   }
 
+  /* What a card calls the kind of thing it acts on. */
+  var TAG_WORDS = {
+    a: 'link', button: 'button', input: 'box', textarea: 'box', select: 'list',
+    summary: 'toggle', label: 'label', li: 'list item', td: 'cell', img: 'image'
+  };
+
+  function waitSeconds(step) {
+    var n = Number(step.value);
+    return isFinite(n) && n >= 0 ? Math.round(n * 10) / 10 : 0;
+  }
+
+  function pathOf(url) {
+    try {
+      var u = new URL(url);
+      return u.pathname === '/' && !u.search ? '' : u.pathname + u.search;
+    } catch (e) { return ''; }
+  }
+
   /* What a card says, in the present tense a flow reads in: the action first,
    * the thing it acts on underneath. */
   function titleOf(step) {
@@ -156,6 +176,10 @@
         return 'Go to tab "' + trunc(step.title || hostOf(step.url), 34) + '"';
       case 'screenshot':
         return 'Take a picture';
+      case 'wait':
+        return 'Wait ' + waitSeconds(step) + ' second' + (waitSeconds(step) === 1 ? '' : 's');
+      case 'goto':
+        return step.value ? 'Open ' + trunc(hostOf(step.value), 34) : 'Open a page';
       default:
         return step.type;
     }
@@ -165,7 +189,11 @@
     var a = step.attrs || {};
     switch (step.type) {
       case 'click':
-        return step.tagName || '';
+        return TAG_WORDS[step.tagName] || step.tagName || '';
+      case 'wait':
+        return '';
+      case 'goto':
+        return step.value ? trunc(pathOf(step.value), 40) : 'no address yet — click to set one';
       case 'input':
         if (a.type === 'password') return 'password box ' + fieldName(step) + ' — never saved';
         return step.value ? 'into ' + fieldName(step) : '';
@@ -322,7 +350,7 @@
   }
 
   function shortTitle(step) {
-    return titleOf(step).replace(/^(Click|Press|Type|Tick|Untick|Set|Clear) /, '').replace(/^["']|["']$/g, '');
+    return titleOf(step).replace(/^(Click|Press|Type|Tick|Untick|Set|Clear|Open) /, '').replace(/^["']|["']$/g, '');
   }
 
   function setNameOf(unit) {
@@ -542,12 +570,20 @@
         : mode === 'redo' ? 'Re-recording'
         : mode === 'nextpage' ? 'Next page'
         : mode === 'dismiss' ? 'Close button'
+        : mode === 'add' ? 'Adding a step'
         : 'Idle';
 
     if (mode === 'nextpage') {
       detail = 'Waiting for you to click the next-page button.';
     } else if (mode === 'dismiss') {
       detail = 'Waiting for you to click the button that closes the pop-up.';
+    } else if (mode === 'add') {
+      var kind = addSpec && addSpec.kinds && addSpec.kinds[0];
+      detail = addSpec && addSpec.makeRepeat ? 'Waiting for you to click one of the things to repeat on.'
+        : kind === 'input' ? 'Waiting for you to type on the page.'
+        : kind === 'key' ? 'Waiting for the key press on the page.'
+        : kind === 'scroll' ? 'Waiting for you to scroll the page.'
+        : 'Waiting for you to click the thing on the page.';
     } else if (mode === 'redo') {
       var at = redoingId ? stepIndexById(redoingId) : -1;
       detail = at >= 0 ? 'Replacing step ' + (at + 1) + '.' : 'Replacing one step.';
@@ -558,7 +594,7 @@
       if (play.label) detail += ' — ' + play.label;
       if (play.matchLevel) detail += ' (' + play.matchLevel + ')';
     } else {
-      detail = steps.length ? steps.length + ' step' + (steps.length === 1 ? '' : 's') + ' in the flow.' : 'Nothing recorded yet.';
+      detail = steps.length ? steps.length + ' step' + (steps.length === 1 ? '' : 's') + '.' : 'No steps yet.';
     }
     el.statusDetail.textContent = detail;
     el.statusLine.className = 'status status-' + mode;
@@ -598,57 +634,71 @@
     el.btnClear.hidden = !idle || !have;
 
     if (mode !== 'idle') disarmClear();
-    renderGuide();
   }
 
-  /* One line saying what to do next, rather than a block of description to
-   * read before anything happens. */
-  function renderGuide() {
-    var g = el.guide;
-    g.textContent = '';
-    var looping = steps.some(isLooping);
-    if (mode === 'playing' || mode === 'redo' || mode === 'nextpage' || mode === 'dismiss') {
-      return;                 /* the status header, or the yellow bar, says it */
-    }
-    if (mode === 'recording') {
-      g.textContent = 'Recording. Go and do the job once on the page, then press "Stop recording".';
-    } else if (!steps.length) {
-      ['Press Record.', 'Do the job once on the page.', 'Press "Stop recording".']
-        .forEach(function (line, i) {
-          var row = document.createElement('span');
-          row.className = 'guide-step';
-          var num = document.createElement('b');
-          num.className = 'guide-num';
-          num.textContent = String(i + 1);
-          row.appendChild(num);
-          row.appendChild(document.createTextNode(line));
-          g.appendChild(row);
-        });
-    } else if (looping) {
-      g.textContent = 'Ready. Press Play — the repeat block runs on every match on the page.';
-    } else {
-      g.textContent = 'Ready. Press Play to run these steps once.';
-    }
-  }
-
+  /* The one line of instruction in the panel, and only while there is
+   * nothing in the flow to look at instead. */
   function renderFlowHint() {
-    var show = mode === 'idle' && steps.length >= 2;
+    var show = !steps.length && (mode === 'idle' || mode === 'recording');
     el.flowHint.hidden = !show;
     if (!show) return;
-    var hasBlock = toUnits(steps).some(function (u) { return u.block && u.steps.length > 1; });
-    el.flowHint.textContent = hasBlock
-      ? 'Click a card or a block to change it. Drag cards to reorder them, into a block, or out of one.'
-      : 'Click a card to change it. Drag a card to reorder it, or drop it onto another card to make a ' +
-        'block that runs as one thing.';
+    el.flowHint.textContent = mode === 'recording'
+      ? 'Do the job once on the page, then press "Stop recording".'
+      : 'Press Record and do the job once on the page, or press + to add a step.';
   }
 
   /* --------------------------------------------------------------- notices */
+
+  /* Where a notice folds: the first line of a run summary, plus the sentence
+   * that says why it stopped when it is a warning; the rest waits behind
+   * "Details". A long single sentence is left whole. */
+  function foldPoint(text, kind) {
+    var nl = text.indexOf('\n');
+    if (nl > 0) {
+      if (kind === 'warn' || kind === 'error') {
+        /* The line that says why a repeat stopped is the one worth showing;
+         * failing that, the first sentence of whatever comes next. */
+        var from = nl + 1;
+        var why = /\n(Step \d+ \(repeat\):)/.exec(text);
+        if (why) from = why.index + 1;
+        var m = /[.!?](\s|$)/.exec(text.slice(from));
+        if (m) {
+          var at = from + m.index + 1;
+          return at < text.length - 10 ? at : 0;
+        }
+      }
+      return nl;
+    }
+    if (text.length <= 170) return 0;
+    var s = /[.!?]\s/.exec(text.slice(40));
+    var cut = s ? 40 + s.index + 1 : 0;
+    return cut > 0 && cut < text.length - 20 ? cut : 0;
+  }
 
   function renderNotice(n) {
     if (!n || !n.text) { el.notice.hidden = true; return; }
     el.notice.hidden = false;
     el.notice.className = 'notice notice-' + (n.kind || 'info');
-    el.notice.textContent = n.text;
+    el.notice.textContent = '';
+    var text = String(n.text);
+    var cut = foldPoint(text, n.kind);
+    var head = document.createElement('span');
+    head.className = 'notice-text';
+    head.textContent = cut ? text.slice(0, cut).trim() : text;
+    el.notice.appendChild(head);
+    if (!cut) return;
+    var more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'link-btn notice-more';
+    more.dataset.role = 'more';
+    more.textContent = 'Details';
+    more.setAttribute('aria-expanded', 'false');
+    el.notice.appendChild(more);
+    var rest = document.createElement('div');
+    rest.className = 'notice-rest';
+    rest.hidden = true;
+    rest.textContent = text.slice(cut).trim();
+    el.notice.appendChild(rest);
   }
 
   var skippedTabs = null;
@@ -728,7 +778,12 @@
     switchTab: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M7 7h.01"/>',
     screenshot: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3"/>',
     repeat: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
-    group: '<path d="M4 7h16M4 12h16M4 17h10"/>'
+    group: '<path d="M4 7h16M4 12h16M4 17h10"/>',
+    wait: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    goto: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    add: '<path d="M12 5v14M5 12h14"/>',
+    next: '<path d="M6 5l7 7-7 7M13 5l7 7-7 7"/>',
+    close: '<path d="M6 6l12 12M18 6L6 18"/>'
   };
 
   function tile(kind) {
@@ -751,6 +806,8 @@
              ':' + (s.repeat && s.repeat.nextPage ? 'n' : '') +
              ':' + (s.repeat ? String(s.repeat.onMissing || '') : '') +
              ':' + (s.repeat && s.repeat.dismiss ? 'd' : '') +
+             ':' + (s.repeat ? String(s.repeat.maxRepeats || '') : '') +
+             ':' + (s.type === 'wait' || s.type === 'goto' ? String(s.value || '') : '') +
              ':' + (s.type === 'screenshot' && s.dataUrl ? 'p' : '');
     }).join('|') + '#' + mode;
   }
@@ -775,11 +832,45 @@
     return mark;
   }
 
-  function gap(attrs, cls) {
+  /* A gap on the spine, and where a step can be added: a small + on the line,
+   * or a wide "Add a step" where there is room for it. */
+  function gap(attrs, cls, add) {
     var g = document.createElement('div');
     g.className = 'gap' + (cls ? ' ' + cls : '');
     Object.keys(attrs).forEach(function (k) { g.dataset[k] = String(attrs[k]); });
+    if (mode === 'idle' && add) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.role = 'add';
+      if (add === 'wide') {
+        b.className = 'add-wide';
+        b.textContent = '+ Add a step';
+        g.classList.add('gap-wide');
+      } else {
+        b.className = 'add-btn';
+        b.textContent = '+';
+        b.title = 'Add a step here';
+        b.setAttribute('aria-label', 'Add a step here');
+        g.classList.add('has-add');
+      }
+      g.appendChild(b);
+    }
     return g;
+  }
+
+  /* The two ends of the flow. */
+  function node(kind, text) {
+    var n = document.createElement('div');
+    n.className = 'node node-' + kind;
+    var dot = document.createElement('span');
+    dot.className = 'node-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    n.appendChild(dot);
+    var t = document.createElement('span');
+    t.className = 'node-text';
+    t.textContent = text;
+    n.appendChild(t);
+    return n;
   }
 
   function buildCard(step, index, u, k, inBlock) {
@@ -879,7 +970,12 @@
     text.appendChild(title);
     var sub = document.createElement('span');
     sub.className = 'card-sub';
-    sub.textContent = setNameOf(unit) + ' · ' + size + ' step' + (size === 1 ? '' : 's');
+    var r = anchor.repeat || {};
+    /* The limit first: it is the thing the user set, and the names of the
+     * steps are right there underneath. */
+    sub.textContent = looping
+      ? 'up to ' + (r.maxRepeats || DEFAULT_MAX_REPEATS) + ' times · ' + setNameOf(unit)
+      : setNameOf(unit) + ' · ' + size + ' step' + (size === 1 ? '' : 's');
     text.appendChild(sub);
     head.appendChild(text);
 
@@ -935,11 +1031,43 @@
       var body = document.createElement('div');
       body.className = 'block-body';
       unit.steps.forEach(function (s, k) {
-        body.appendChild(gap({ blockUnit: u, k: k }, k === 0 ? 'gap-first' : ''));
+        body.appendChild(gap({ blockUnit: u, k: k }, k === 0 ? 'gap-first' : '', k === 0 ? '' : 'plus'));
         body.appendChild(buildCard(s, startIndex + k, u, k, true));
       });
-      body.appendChild(gap({ blockUnit: u, k: size }, 'gap-last'));
+      body.appendChild(gap({ blockUnit: u, k: size }, 'gap-last', 'wide'));
       block.appendChild(body);
+    }
+
+    /* What the repeat does when the page runs out, and what it does about a
+     * step that is missing, said on the block itself: they are the two
+     * things a person has to know to trust it to run down a whole list. */
+    if (looping) {
+      var tail = document.createElement('div');
+      tail.className = 'block-tail';
+      var np = anchor.repeat && anchor.repeat.nextPage;
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'tail-row' + (np ? '' : ' tail-add');
+      row.dataset.role = 'tailnext';
+      row.dataset.id = anchor.id;
+      row.textContent = np
+        ? '↪ When this page runs out: go to the next page (' + describeControl(np) + ')'
+        : '+ Go to the next page when this one runs out';
+      row.title = np ? 'Change or remove the next-page button' : 'Record the button that shows the next page';
+      tail.appendChild(row);
+      if (onMissingOf(anchor) !== 'stop') {
+        var mrow = document.createElement('button');
+        mrow.type = 'button';
+        mrow.className = 'tail-row';
+        mrow.dataset.role = 'tailmissing';
+        mrow.dataset.id = anchor.id;
+        mrow.textContent = onMissingOf(anchor) === 'dismiss'
+          ? '⤫ A different pop-up is closed and that row skipped'
+          : '⤫ A missing step is skipped';
+        mrow.title = 'Change what happens when a step is missing';
+        tail.appendChild(mrow);
+      }
+      block.appendChild(tail);
     }
 
     var drop = document.createElement('div');
@@ -967,20 +1095,27 @@
 
     el.flow.textContent = '';
     var units = toUnits(steps);
+    el.flow.appendChild(node('start', steps.length ? 'Start on ' + tabName(steps[0]) : 'Start'));
     var index = 0;
     units.forEach(function (unit, u) {
-      el.flow.appendChild(gap({ gap: u }, u === 0 ? 'gap-first' : ''));
+      el.flow.appendChild(gap({ gap: u }, '', 'plus'));
       if (tabChanged(index) && unit.steps[0].type !== 'switchTab') el.flow.appendChild(pageMark(unit.steps[0]));
       if (unit.block) el.flow.appendChild(buildBlock(unit, u, index));
       else el.flow.appendChild(buildCard(unit.steps[0], index, u, 0, false));
       index += unit.steps.length;
     });
-    if (units.length) el.flow.appendChild(gap({ gap: units.length }, 'gap-last'));
+    el.flow.appendChild(gap({ gap: units.length }, '', units.length ? 'plus' : 'wide'));
+    el.flow.appendChild(node('end', 'End'));
 
-    el.empty.hidden = steps.length > 0;
     el.count.textContent = String(steps.length);
     renderFlowHint();
     renderRedoBar();
+    if (pendingOpen && stepById(pendingOpen)) {
+      var toOpen = pendingOpen;
+      pendingOpen = null;
+      selection = { id: toOpen, view: 'step' };
+      markSelected();
+    }
     renderDrawer();
 
     /* While recording, the step that just happened is the one worth seeing;
@@ -1169,6 +1304,13 @@
       if (!el.drawer.hidden) closeDrawer();
       return;
     }
+    if (selection.view === 'catalog') {
+      el.drawer.hidden = false;
+      document.body.classList.add('drawer-open');
+      el.drawer.textContent = '';
+      buildCatalog(selection.where);
+      return;
+    }
     var units = toUnits(steps);
     var loc = locate(units, selection.id);
     if (!loc) { closeDrawer(); return; }
@@ -1301,6 +1443,143 @@
     return dl;
   }
 
+  /* ---- the catalog: adding a step ------------------------------------- */
+
+  var CATALOG = [
+    { kind: 'click', icon: 'click', title: 'Click something', sub: 'A button or link on the page' },
+    { kind: 'input', icon: 'input', title: 'Type into a box', sub: 'Type on the page, then press Done' },
+    { kind: 'key', icon: 'key', title: 'Press a key', sub: 'Enter, Tab or Escape, in a box' },
+    { kind: 'scroll', icon: 'scroll', title: 'Scroll', sub: 'Scroll the page, then press Done' },
+    { kind: 'wait', icon: 'wait', title: 'Wait', sub: 'Pause for a few seconds' },
+    { kind: 'goto', icon: 'goto', title: 'Open a page', sub: 'Go to a web address' },
+    { kind: 'repeat', icon: 'repeat', title: 'Repeat for each match', wide: true, outsideOnly: true,
+      sub: 'Click one of the things to repeat on; the others like it are found for you' },
+    { kind: 'nextpage', icon: 'next', title: 'Go to the next page', loopOnly: true,
+      sub: 'When the block runs out of matches' },
+    { kind: 'dismiss', icon: 'close', title: 'Close a pop-up', loopOnly: true,
+      sub: 'One that is not the pop-up the block expects' }
+  ];
+
+  /* The looping block a place belongs to: inside one, or right after one. */
+  function loopFor(where, units) {
+    if (where.blockUnit != null) {
+      var unit = units[where.blockUnit];
+      return unit && isLooping(unit.steps[0]) ? unit.steps[0] : null;
+    }
+    var prev = where.gap > 0 ? units[where.gap - 1] : null;
+    return prev && prev.block && isLooping(prev.steps[0]) ? prev.steps[0] : null;
+  }
+
+  /* Where in the stored list a place on the canvas is, and which block's
+   * set has to grow to take the step in. */
+  function placeOf(where, units) {
+    var index = 0;
+    if (where.blockUnit != null) {
+      for (var i = 0; i < where.blockUnit && i < units.length; i++) index += units[i].steps.length;
+      var unit = units[where.blockUnit];
+      if (!unit) return { index: steps.length, blockAnchorId: null };
+      var k = Math.max(1, Math.min(where.k, unit.steps.length));
+      return { index: index + k, blockAnchorId: unit.steps[0].id };
+    }
+    for (var j = 0; j < where.gap && j < units.length; j++) index += units[j].steps.length;
+    return { index: index, blockAnchorId: null };
+  }
+
+  function whereText(where, units) {
+    if (where.blockUnit != null) {
+      var unit = units[where.blockUnit];
+      return unit && isLooping(unit.steps[0]) ? 'into the repeat block' : 'into the block';
+    }
+    if (!units.length) return 'as the first step';
+    if (where.gap === 0) return 'at the start';
+    if (where.gap >= units.length) return 'at the end';
+    var before = units[where.gap - 1];
+    return 'after step ' + (stepIndexById(before.steps[before.steps.length - 1].id) + 1);
+  }
+
+  function openCatalog(where) {
+    if (mode !== 'idle') return;
+    selection = { id: null, view: 'catalog', where: where };
+    markSelected();
+    renderDrawer();
+  }
+
+  function buildCatalog(where) {
+    var units = toUnits(steps);
+    var d = el.drawer;
+    d.appendChild(drawerHead('add', 'Add a step', whereText(where, units)));
+    var loop = loopFor(where, units);
+    var inside = where.blockUnit != null;
+    var grid = document.createElement('div');
+    grid.className = 'cat-grid';
+    CATALOG.forEach(function (item) {
+      if (item.outsideOnly && inside) return;
+      if (item.loopOnly && !loop) return;
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cat-btn' + (item.wide ? ' wide' : '');
+      b.dataset.role = 'catalog';
+      b.dataset.kind = item.kind;
+      b.appendChild(tile(item.icon));
+      var t = document.createElement('span');
+      t.className = 'cat-text';
+      var tt = document.createElement('b');
+      tt.textContent = item.title;
+      t.appendChild(tt);
+      var ss = document.createElement('span');
+      ss.textContent = item.sub;
+      t.appendChild(ss);
+      b.appendChild(t);
+      grid.appendChild(b);
+    });
+    var sec = section('');
+    sec.appendChild(grid);
+    d.appendChild(sec);
+  }
+
+  /* What choosing an action from the catalog sets in motion. Most kinds send
+   * the user to the page to do the one thing; a wait or an address goes
+   * straight in; the two that belong to a repeat block set that block up. */
+  function catalogAction(kind) {
+    var where = selection && selection.where;
+    if (!where) return;
+    var units = toUnits(steps);
+    var place = placeOf(where, units);
+    var loop = loopFor(where, units);
+    closeDrawer();
+    undoSnapshot = null;
+    if (kind === 'wait' || kind === 'goto') {
+      actAndReport({
+        cmd: 'addStep', step: { type: kind, value: kind === 'wait' ? '2' : '' },
+        index: place.index, blockAnchorId: place.blockAnchorId
+      }).then(function (res) {
+        if (res && res.ok && res.id) {
+          pendingOpen = res.id;
+          if (stepById(res.id)) renderFlow(true);
+        }
+      });
+      return;
+    }
+    if (kind === 'nextpage') {
+      if (loop) actAndReport({ cmd: 'startNextPage', id: loop.id });
+      return;
+    }
+    if (kind === 'dismiss') {
+      if (!loop) return;
+      saveRepeat(loop.id, Object.assign({}, loop.repeat, { enabled: true, onMissing: 'dismiss' }))
+        .then(function () { return actAndReport({ cmd: 'startDismiss', id: loop.id }); });
+      return;
+    }
+    actAndReport({
+      cmd: 'startAdd',
+      spec: {
+        kinds: [kind === 'repeat' ? 'click' : kind],
+        index: place.index, blockAnchorId: place.blockAnchorId,
+        makeRepeat: kind === 'repeat'
+      }
+    });
+  }
+
   /* ---- the drawer for one step ---------------------------------------- */
 
   function buildStepDrawer(loc, units) {
@@ -1333,6 +1612,41 @@
       about.appendChild(img);
     }
     d.appendChild(about);
+
+    if (step.type === 'wait') {
+      var how = section('How long');
+      var wrow = document.createElement('div');
+      wrow.className = 'row';
+      wrow.appendChild(labelSpan('Wait'));
+      var secs = document.createElement('input');
+      secs.type = 'number';
+      secs.min = '0';
+      secs.max = '600';
+      secs.step = '0.5';
+      secs.className = 'field-inline';
+      secs.value = String(step.value == null ? '' : step.value);
+      secs.dataset.fkey = step.id + ':value';
+      secs.dataset.role = 'value';
+      secs.dataset.id = step.id;
+      secs.setAttribute('aria-label', 'Seconds to wait');
+      wrow.appendChild(secs);
+      wrow.appendChild(labelSpan('seconds'));
+      how.appendChild(wrow);
+      d.appendChild(how);
+    }
+    if (step.type === 'goto') {
+      var addr = section('Web address');
+      var url = document.createElement('input');
+      url.type = 'text';
+      url.value = step.value || '';
+      url.placeholder = 'https://…';
+      url.spellcheck = false;
+      url.dataset.fkey = step.id + ':value';
+      url.dataset.role = 'value';
+      url.dataset.id = step.id;
+      addr.appendChild(makeField('Open this address', url));
+      d.appendChild(addr);
+    }
 
     /* Looping a single click should not require grouping it with anything. */
     if (step.type === 'click' && !inBlock) {
@@ -1369,9 +1683,12 @@
     var acts = section('');
     var grid2 = document.createElement('div');
     grid2.className = 'action-grid';
-    grid2.appendChild(actionButton('redo', step.id, '↻', 'Re-record this step',
-      { title: 'Do this one action again on the page and replace this step with it' }));
-    grid2.appendChild(actionButton('delete', step.id, '×', 'Delete this step', { danger: true }));
+    var onPage = step.type !== 'wait' && step.type !== 'goto' && step.type !== 'switchTab' && step.type !== 'screenshot';
+    if (onPage) {
+      grid2.appendChild(actionButton('redo', step.id, '↻', 'Re-record this step',
+        { title: 'Do this one action again on the page and replace this step with it' }));
+    }
+    grid2.appendChild(actionButton('delete', step.id, '×', 'Delete this step', { danger: true, wide: !onPage }));
     acts.appendChild(grid2);
     d.appendChild(acts);
   }
@@ -1626,6 +1943,8 @@
 
     if (role === 'close') { closeDrawer(); return; }
 
+    if (role === 'catalog') { catalogAction(target.dataset.kind); return; }
+
     if (role === 'redo') {
       undoSnapshot = null;
       closeDrawer();
@@ -1819,6 +2138,10 @@
     var target = e.target;
     if (!target || !target.dataset || !target.dataset.role) return;
     var role = target.dataset.role;
+    if (role === 'value') {
+      ask({ cmd: 'setValue', id: target.dataset.id, value: target.value });
+      return;
+    }
     if (role !== 'pattern' && role !== 'max' && role !== 'delay') return;
 
     var step = stepById(target.dataset.id);
@@ -1848,6 +2171,11 @@
     var target = e.target;
     if (!target || !target.dataset) return;
     var role = target.dataset.role;
+    if (role === 'value') {
+      /* Tidied once typing is over: an address gets its https://, a wait its number. */
+      ask({ cmd: 'setValue', id: target.dataset.id, value: target.value, final: true });
+      return;
+    }
     if (role !== 'max' && role !== 'delay') return;
     var step = stepById(target.dataset.id);
     if (!step || !step.repeat) return;
@@ -1869,11 +2197,28 @@
     var target = e.target;
     if (mode !== 'idle') return;
     var roleEl = target.closest ? target.closest('[data-role]') : null;
-    if (roleEl && roleEl.dataset.role === 'collapse') {
+    var role = roleEl ? roleEl.dataset.role : '';
+    if (role === 'collapse') {
       var s = stepById(roleEl.dataset.id);
       if (s) saveSet(s.id, Object.assign({}, s.set || { size: setSizeOf(s) }, { collapsed: !(s.set && s.set.collapsed) }));
       return;
     }
+    if (role === 'add') {
+      var g = roleEl.closest('.gap');
+      if (!g) return;
+      openCatalog(g.dataset.blockUnit != null
+        ? { blockUnit: Number(g.dataset.blockUnit), k: Number(g.dataset.k) }
+        : { gap: Number(g.dataset.gap) });
+      return;
+    }
+    if (role === 'tailnext') {
+      var owner = stepById(roleEl.dataset.id);
+      if (!owner) return;
+      if (owner.repeat && owner.repeat.nextPage) openDrawer(owner.id, 'block');
+      else { undoSnapshot = null; actAndReport({ cmd: 'startNextPage', id: owner.id }); }
+      return;
+    }
+    if (role === 'tailmissing') { openDrawer(roleEl.dataset.id, 'block'); return; }
     if (target.closest && target.closest('.grip')) return;
     var head = target.closest ? target.closest('.block-head') : null;
     if (head) { openDrawer(head.dataset.id, 'block'); return; }
@@ -1975,7 +2320,7 @@
    * page, or cancel. Only the wording and what the click is kept for differ. */
   function renderRedoBar() {
     var bar = el.redoBar;
-    if (mode !== 'redo' && mode !== 'nextpage' && mode !== 'dismiss') {
+    if (mode !== 'redo' && mode !== 'nextpage' && mode !== 'dismiss' && mode !== 'add') {
       bar.hidden = true;
       bar.textContent = '';
       return;
@@ -1984,6 +2329,32 @@
     bar.textContent = '';
     var msg = document.createElement('span');
     msg.className = 'redo-text';
+    if (mode === 'add') {
+      var kind = addSpec && addSpec.kinds && addSpec.kinds[0];
+      var streamed = kind === 'input' || kind === 'scroll';
+      msg.textContent = addSpec && addSpec.makeRepeat
+        ? 'On the page, click one of the things to repeat on. The others like it are found by themselves.'
+        : kind === 'input' ? 'On the page, type into the box. Press Done when the text is in.'
+        : kind === 'key' ? 'On the page, press Enter, Tab or Escape in the box.'
+        : kind === 'scroll' ? 'Scroll the page to where you want it, then press Done.'
+        : 'On the page, click the thing this step should click.';
+      bar.appendChild(msg);
+      if (streamed) {
+        var done = document.createElement('button');
+        done.type = 'button';
+        done.className = 'btn btn-done';
+        done.dataset.role = 'finishadd';
+        done.textContent = 'Done';
+        bar.appendChild(done);
+      }
+      var stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'btn';
+      stop.dataset.role = 'canceladd';
+      stop.textContent = 'Cancel';
+      bar.appendChild(stop);
+      return;
+    }
     if (mode === 'nextpage') {
       msg.textContent = 'Go to the page and click the control that brings up the next page — ' +
                         'Next, a chevron, "Load more". Scrolling to reach it is fine; the next ' +
@@ -2014,6 +2385,13 @@
     if (role === 'cancelredo') actAndReport({ cmd: 'cancelRedo' });
     if (role === 'cancelnextpage') actAndReport({ cmd: 'cancelNextPage' });
     if (role === 'canceldismiss') actAndReport({ cmd: 'cancelDismiss' });
+    if (role === 'canceladd') actAndReport({ cmd: 'cancelAdd' });
+    if (role === 'finishadd') actAndReport({ cmd: 'finishAdd' });
+  });
+
+  el.btnHelp.addEventListener('click', function () {
+    el.help.hidden = !el.help.hidden;
+    el.btnHelp.setAttribute('aria-expanded', el.help.hidden ? 'false' : 'true');
   });
 
   /* After a step is re-recorded its loop still carries the old element's
@@ -2067,9 +2445,8 @@
   }
 
   function repeatSetUpNotice(size) {
-    return 'Set to repeat: ' + (size === 1 ? 'that step' : 'those ' + size + ' steps are in a block that') +
-      ' will run on every match found, scrolling down for more as it goes. Click the block to change ' +
-      'that or turn it off.';
+    return 'Set to repeat: ' + (size === 1 ? 'that step' : 'those ' + size + ' steps') +
+      ' will run on every match on the page. Click the block to change that.';
   }
 
   function firstRepeatable(list, from, budget) {
@@ -2131,7 +2508,16 @@
   }
 
   el.notice.addEventListener('click', function (e) {
-    if (!e.target || !e.target.dataset || e.target.dataset.role !== 'undo') return;
+    var role = e.target && e.target.dataset ? e.target.dataset.role : '';
+    if (role === 'more') {
+      var rest = el.notice.querySelector('.notice-rest');
+      if (!rest) return;
+      rest.hidden = !rest.hidden;
+      e.target.textContent = rest.hidden ? 'Details' : 'Less';
+      e.target.setAttribute('aria-expanded', rest.hidden ? 'false' : 'true');
+      return;
+    }
+    if (role !== 'undo') return;
     if (!undoSnapshot) return;
     var restore = undoSnapshot;
     undoSnapshot = null;
@@ -2148,7 +2534,7 @@
   function disarmClear() {
     clearArmed = false;
     if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
-    el.btnClear.textContent = 'Clear all';
+    el.btnClear.textContent = 'Clear';
     el.btnClear.classList.remove('armed');
   }
 
@@ -2271,8 +2657,8 @@
 
     if (loadedFrom) {
       el.libraryLoaded.hidden = false;
-      el.libraryLoaded.textContent = 'working on “' + trunc(loadedFrom.name, 22) + '”';
-      el.libraryLoaded.title = 'The flow above was loaded from “' + loadedFrom.name + '”';
+      el.libraryLoaded.textContent = '“' + trunc(loadedFrom.name, 26) + '”';
+      el.libraryLoaded.title = 'This flow was loaded from “' + loadedFrom.name + '”';
     } else {
       el.libraryLoaded.hidden = true;
       el.libraryLoaded.textContent = '';
@@ -2564,6 +2950,7 @@
   function applyState(local, playState) {
     mode = (local && local.mode) || 'idle';
     redoingId = (local && local.redoStepId) || null;
+    addSpec = (local && local.addSpec) || null;
     steps = Array.isArray(local && local.steps) ? local.steps : [];
     library = Array.isArray(local && local.library) ? local.library : [];
     loadedFrom = (local && local.loadedFrom) || null;
@@ -2599,12 +2986,13 @@
     if (area === 'local') {
       if (changes.mode) mode = changes.mode.newValue || 'idle';
       if (changes.redoStepId) redoingId = changes.redoStepId.newValue || null;
+      if (changes.addSpec) addSpec = changes.addSpec.newValue || null;
       if (changes.steps) steps = Array.isArray(changes.steps.newValue) ? changes.steps.newValue : [];
       if (changes.library) library = Array.isArray(changes.library.newValue) ? changes.library.newValue : [];
       if (changes.loadedFrom) loadedFrom = changes.loadedFrom.newValue || null;
       if (changes.notice) renderNotice(changes.notice.newValue);
       if (changes.skipped) renderSkipped(changes.skipped.newValue);
-      if (changes.mode || changes.steps || changes.redoStepId || changes.nextPageForId || changes.dismissForId) {
+      if (changes.mode || changes.steps || changes.redoStepId || changes.nextPageForId || changes.dismissForId || changes.addSpec) {
         renderStatus();
         renderButtons();
         renderSize();
