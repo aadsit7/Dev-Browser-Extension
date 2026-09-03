@@ -101,6 +101,35 @@ if (window.__miniRpaLoaded) {
       return false;
     }
 
+    /* Ids a framework hands out at render time - ember782, mat-input-4,
+     * react-select-2-input - are the same on the next load only by luck, and
+     * a selector built on one clicks whatever holds that id now. An id that
+     * ends in digits, or carries a purely numeric segment, is treated as one
+     * of those and never used as a hook. */
+    function looksGeneratedId(value) {
+      var s = String(value == null ? '' : value);
+      if (looksGenerated(s)) return true;
+      if (/[a-z_-]\d+$/i.test(s)) return true;
+      if (/(^|[-_:.])\d+([-_:.]|$)/.test(s)) return true;
+      return false;
+    }
+
+    /* A recorded selector that leans on such an id, or on a counted position,
+     * is a weak hook. At playback the wording is tried first and the hook only
+     * as a fallback - and even then what it lands on has to look like what was
+     * recorded, or it is not taken. Recordings made before this was known are
+     * covered as much as new ones. */
+    function weakSelector(selector) {
+      var sel = String(selector == null ? '' : selector);
+      if (/:nth-(of-type|child|last-child|last-of-type)\b/i.test(sel)) return true;
+      var re = /#((?:\\.|[\w-])+)/g;
+      var m;
+      while ((m = re.exec(sel))) {
+        if (looksGeneratedId(m[1].replace(/\\(.)/g, '$1'))) return true;
+      }
+      return false;
+    }
+
     /* ------------------------------------------------ shadow-aware querying */
 
     /* A shadow root is a self-contained mini-document a page can hang off any
@@ -251,17 +280,40 @@ if (window.__miniRpaLoaded) {
       return el.id === BADGE_ID || !!el.closest('#' + BADGE_ID);
     }
 
-    /* The topmost dialog on the page, if one is open. Declared before
+    /* Every dialog showing on the page, in document order. Declared before
      * isBehindModal because that has to know what the dialog contains. */
-    function openDialog() {
+    function visibleDialogs() {
       var nodes;
       try {
         nodes = deepQueryAll('[role="dialog"], [aria-modal="true"], dialog[open]');
-      } catch (e) { return null; }
-      for (var i = nodes.length - 1; i >= 0; i--) {
-        var n = nodes[i];
+      } catch (e) { return []; }
+      return nodes.filter(function (n) {
         var rect = n.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) return n;
+        return rect.width > 0 && rect.height > 0;
+      });
+    }
+
+    /* The topmost dialog on the page, if one is open. */
+    function openDialog() {
+      var open = visibleDialogs();
+      return open.length ? open[open.length - 1] : null;
+    }
+
+    /* Dialogs that were already up when a pass clicked its row - a chat
+     * bubble, a cookie notice, a help panel - are part of the page, not
+     * something the click brought up. Only a dialog that has appeared since
+     * counts as the pass's own, whether that is where its next step is looked
+     * for or what "close the pop-up" closes. */
+    var dialogsBefore = [];
+
+    function noteDialogs() {
+      dialogsBefore = visibleDialogs();
+    }
+
+    function newDialog() {
+      var open = visibleDialogs();
+      for (var i = open.length - 1; i >= 0; i--) {
+        if (dialogsBefore.indexOf(open[i]) === -1) return open[i];
       }
       return null;
     }
@@ -269,11 +321,16 @@ if (window.__miniRpaLoaded) {
     /* A dialog that takes over the page: everything outside it is unreachable
      * until it closes. A plain role="dialog" with no modal flag is treated as
      * an ordinary panel, because plenty of them do not block anything. */
+    function isModal(dlg) {
+      if (dlg.hasAttribute('aria-modal') && dlg.getAttribute('aria-modal') !== 'false') return true;
+      return dlg.tagName === 'DIALOG' && dlg.hasAttribute('open');
+    }
+
+    /* The topmost modal, wherever it sits in the tree. A chat panel that
+     * happens to come later in the document is not on top of it. */
     function modalDialog() {
-      var dlg = openDialog();
-      if (!dlg) return null;
-      if (dlg.hasAttribute('aria-modal') && dlg.getAttribute('aria-modal') !== 'false') return dlg;
-      if (dlg.tagName === 'DIALOG' && dlg.hasAttribute('open')) return dlg;
+      var open = visibleDialogs();
+      for (var i = open.length - 1; i >= 0; i--) if (isModal(open[i])) return open[i];
       return null;
     }
 
@@ -288,11 +345,13 @@ if (window.__miniRpaLoaded) {
      * reachable, wherever it happens to sit in the tree. */
     function isBehindModal(el) {
       try {
+        /* A modal covers everything outside it and nothing inside it - and
+         * that holds whether or not it is the last dialog in the document. */
+        var modal = modalDialog();
+        if (modal) return !containsDeep(modal, el);
         var dlg = openDialog();
         if (dlg && containsDeep(dlg, el)) return false;
-        if (closestDeep(el, '[aria-hidden="true"], [inert]')) return true;
-        /* No aria-hidden, but a modal is up: everything outside it is covered. */
-        return !!modalDialog();
+        return !!closestDeep(el, '[aria-hidden="true"], [inert]');
       } catch (e) { return false; }
     }
 
@@ -322,7 +381,7 @@ if (window.__miniRpaLoaded) {
       var root = rootOf(el);
       while (node && node.nodeType === 1 && parts.length < 10) {
         var id = attr(node, 'id');
-        if (id && !looksGenerated(id) && uniqueSelector('#' + cssEscape(id), root)) {
+        if (id && !looksGeneratedId(id) && uniqueSelector('#' + cssEscape(id), root)) {
           parts.unshift('#' + cssEscape(id));
           break;
         }
@@ -358,7 +417,7 @@ if (window.__miniRpaLoaded) {
       var lead = host ? buildSelector(host) + PIERCE : '';
 
       var id = attr(el, 'id');
-      if (id && !looksGenerated(id) && uniqueSelector('#' + cssEscape(id), root)) {
+      if (id && !looksGeneratedId(id) && uniqueSelector('#' + cssEscape(id), root)) {
         return lead + '#' + cssEscape(id);
       }
       var testId = attr(el, 'data-testid');
@@ -592,15 +651,52 @@ if (window.__miniRpaLoaded) {
       return null;
     }
 
+    /* A form field's name outlives any id a framework gave it, so a typing
+     * step recorded against such an id can still find its field. */
+    function findByName(step, root) {
+      var name = step.attrs && step.attrs.name;
+      if (!name) return null;
+      var tag = (step.tagName || '*').toLowerCase();
+      var nodes;
+      try { nodes = deepQueryAll(tag + '[name="' + cssEscape(name) + '"]', root); } catch (e) { return null; }
+      for (var i = 0; i < nodes.length; i++) if (isUsable(nodes[i])) return nodes[i];
+      return null;
+    }
+
+    /* Whether an element a weak hook landed on is plausibly the one that was
+     * recorded: the same kind of element, and where the recording had
+     * wording or a label, the same wording or label. A hook that leads
+     * somewhere else is a hook to ignore, not to click. */
+    function looksLikeRecorded(el, step) {
+      if (!el || !step) return false;
+      var tag = String(step.tagName || '').toLowerCase();
+      if (tag && tag !== '*' && el.tagName.toLowerCase() !== tag) return false;
+      var a = step.attrs || {};
+      if (a.name && attr(el, 'name') && attr(el, 'name') !== a.name) return false;
+      if (step.type === 'input' || step.type === 'change' || step.type === 'key') return true;
+      var wantText = squash(step.fallbackText).toLowerCase();
+      var wantAria = squash(step.ariaLabel).toLowerCase();
+      if (!wantText && !wantAria) return true;
+      var text = visibleText(el).toLowerCase();
+      var aria = attr(el, 'aria-label').toLowerCase();
+      return (!!wantText && (text === wantText || aria === wantText)) ||
+             (!!wantAria && (aria === wantAria || text === wantAria));
+    }
+
     function findWithin(root, step) {
       if (step.selector) {
         /* The search is already scoped to this container, so only the part of
          * the selector describing the element itself is wanted - the route to
          * whatever root it was recorded in leads somewhere above here. */
+        var weak = weakSelector(step.selector);
         var hits = [];
         try { hits = deepQueryAll(lastHop(step.selector), root); } catch (e) { hits = []; }
         for (var h = 0; h < hits.length; h++) {
-          if (isUsable(hits[h])) return hits[h];
+          if (isUsable(hits[h]) && (!weak || looksLikeRecorded(hits[h], step))) return hits[h];
+        }
+        if (weak) {
+          var named = findByName(step, root);
+          if (named) return named;
         }
       }
       var want = squash(step.fallbackText || step.ariaLabel || '').toLowerCase();
@@ -619,18 +715,23 @@ if (window.__miniRpaLoaded) {
 
     function findOnce(step) {
       /* A dialog on top of the page owns the interaction while it is open, and
-       * pages very often have a second "Next" or "Accept" underneath it. */
-      var dialog = openDialog();
+       * pages very often have a second "Next" or "Accept" underneath it. The
+       * one the pass just brought up comes first; a panel that was open all
+       * along only afterwards. */
+      var dialog = newDialog() || openDialog();
       if (dialog) {
         var inDialog = findWithin(dialog, step);
         if (inDialog) return inDialog;
       }
-      /* A path counted through the tree is the weakest thing we record. Dialog
-       * markup in particular is rebuilt each time it opens and rarely lands at
-       * the same index twice, so where the element had recognisable wording,
-       * that is tried first and the path is only the fallback. */
-      var positional = /:nth-(of-type|child|last-child|last-of-type)\b/i.test(step.selector || '');
-      if (positional) {
+      /* A path counted through the tree, or a framework's numbered id, is the
+       * weakest thing we record. Dialog markup in particular is rebuilt each
+       * time it opens and rarely lands at the same index or id twice, so where
+       * the element had recognisable wording, that is tried first and the hook
+       * is only the fallback. */
+      var weak = weakSelector(step.selector || '');
+      if (weak) {
+        var byName = findByName(step);
+        if (byName) return byName;
         var byText = findByText(step);
         if (byText) return byText;
       }
@@ -640,13 +741,13 @@ if (window.__miniRpaLoaded) {
         try { matches = deepQueryAll(step.selector); } catch (e) { matches = null; }
         if (matches && matches.length) {
           for (var i = 0; i < matches.length; i++) {
-            if (isUsable(matches[i])) return matches[i];
+            if (isUsable(matches[i]) && (!weak || looksLikeRecorded(matches[i], step))) return matches[i];
           }
           /* The element is on the page but not usable yet - hidden, or sitting
            * behind a dialog. Waiting for it is right; falling through to match
            * whatever else happens to share its wording is how a replay ends up
            * clicking a completely different button. */
-          if (!positional) return null;
+          if (!weak) return null;
         }
       }
       return findByText(step);
@@ -906,6 +1007,93 @@ if (window.__miniRpaLoaded) {
       return nodes.filter(isUsable);
     }
 
+    /* The pattern as written, and failing that the same idea one notch
+     * looser: the same attributes or wording on any kind of control. A site
+     * that serves a row's button as <a> one week and <button> the next should
+     * not stop a loop that plainly still has rows to do - the attributes and
+     * the wording are what identify a row, not the tag. Only the tag is ever
+     * loosened; an attribute or a pinned wording is never dropped. */
+    var CONTROLS = ':is(button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"])';
+
+    function relaxedPattern(pattern) {
+      var parsed = parsePattern(pattern);
+      var css = parsed.css;
+      if (/[\s>+~]/.test(css)) return '';                  /* only a single compound selector */
+      var m = /^([a-z][a-z0-9-]*)(.*)$/i.exec(css);
+      if (!m) return '';                                    /* no tag to loosen */
+      var text = parsed.text !== null ? ':text("' + quote(parsed.text) + '")'
+               : parsed.textPrefix !== null ? ':text^("' + quote(parsed.textPrefix) + '")' : '';
+      if (!m[2] && !text) return '';                        /* a bare tag says nothing about a row */
+      return CONTROLS + m[2] + text;
+    }
+
+    function queryPatternHealed(pattern) {
+      var nodes = queryPattern(pattern);
+      if (nodes.length) return { nodes: nodes, used: '' };
+      var alt = relaxedPattern(pattern);
+      if (!alt) return { nodes: nodes, used: '' };
+      var more;
+      try { more = queryPattern(alt); } catch (e) { return { nodes: nodes, used: '' }; }
+      return more.length ? { nodes: more, used: alt } : { nodes: nodes, used: '' };
+    }
+
+    /* Everything the panel needs to say why a count is what it is: how many
+     * elements the selector finds before any filtering, how many of those
+     * show the wording it is pinned to, how many of the rest are hidden,
+     * disabled or behind a pop-up, what the others say instead, and whether
+     * the same hook lands on another kind of control. */
+    function diagnosePattern(pattern) {
+      var parsed = parsePattern(pattern);
+      if (!parsed.css) throw new Error('The match pattern is empty.');
+      if (/:nth-(of-type|child|last-child|last-of-type)\b/i.test(parsed.css)) throw positionalError();
+      var raw;
+      try { raw = deepQueryAll(parsed.css); } catch (e) {
+        throw new Error('"' + parsed.css + '" is not a valid CSS selector.');
+      }
+      var want = parsed.text !== null ? squash(parsed.text).toLowerCase() : null;
+      var head = parsed.textPrefix !== null ? squash(parsed.textPrefix).toLowerCase() : null;
+      var worded = raw.filter(function (n) {
+        var t = visibleText(n).toLowerCase();
+        if (want !== null) return t === want;
+        if (head !== null) return t.indexOf(head) === 0;
+        return true;
+      });
+      var usable = worded.filter(isUsable);
+      var hidden = 0;
+      var disabled = 0;
+      var behind = 0;
+      worded.forEach(function (n) {
+        if (isUsable(n)) return;
+        if (n.disabled || attr(n, 'aria-disabled') === 'true') disabled += 1;
+        else if (isBehindModal(n)) behind += 1;
+        else hidden += 1;
+      });
+      var samples = [];
+      if (!worded.length) {
+        raw.forEach(function (n) {
+          if (samples.length >= 3) return;
+          var t = squash(visibleText(n) || attr(n, 'aria-label')).slice(0, 30);
+          if (t && samples.indexOf(t) === -1) samples.push(t);
+        });
+      }
+      var healed = queryPatternHealed(pattern);
+      var blocker = behind ? (modalDialog() || openDialog()) : null;
+      return {
+        ok: true,
+        count: usable.length,
+        raw: raw.length,
+        worded: worded.length,
+        hidden: hidden,
+        disabled: disabled,
+        behind: behind,
+        blocker: blocker ? dialogHeading(blocker) : '',
+        samples: samples,
+        healed: healed.used,
+        healedCount: healed.used ? healed.nodes.length : 0,
+        healedTag: healed.used && healed.nodes.length ? healed.nodes[0].tagName.toLowerCase() : ''
+      };
+    }
+
     /* ------------------------------------------------------ repeat execution */
 
     /* Identifies "this is the same element as last round" without holding a
@@ -971,7 +1159,8 @@ if (window.__miniRpaLoaded) {
      * how a pattern that looks right turns out to be picking up the wrong
      * rows. */
     function previewPattern(pattern) {
-      var nodes = queryPattern(pattern);
+      var found = queryPatternHealed(pattern);
+      var nodes = found.nodes;
       var labels = [];
       for (var i = 0; i < nodes.length; i++) {
         if (i === 0) bringIntoView(nodes[i]);
@@ -989,12 +1178,14 @@ if (window.__miniRpaLoaded) {
           labels.push(squash(visibleText(el) || attr(el, 'aria-label')).slice(0, 40));
         }
       }
-      return { ok: true, count: nodes.length, labels: labels };
+      return { ok: true, count: nodes.length, labels: labels, healed: found.used };
     }
 
     function repeatProbe(pattern) {
-      var nodes = queryPattern(pattern);
-      return { ok: true, count: nodes.length, distinct: allSignaturesDistinct(nodes) };
+      /* A pass is starting: whatever is open now is part of the page. */
+      noteDialogs();
+      var found = queryPatternHealed(pattern);
+      return { ok: true, count: found.nodes.length, distinct: allSignaturesDistinct(found.nodes), healed: found.used };
     }
 
     /* Clicks one element and reports which one, so the caller can drive a
@@ -1020,7 +1211,8 @@ if (window.__miniRpaLoaded) {
     }
 
     function repeatClickNext(pattern, handled, useSignatures, previous) {
-      var nodes = queryPattern(pattern);
+      var found = queryPatternHealed(pattern);
+      var nodes = found.nodes;
       var countBefore = nodes.length;
 
       /* Did last round's click actually do anything? */
@@ -1041,16 +1233,20 @@ if (window.__miniRpaLoaded) {
         target = nodes[0];
       }
       if (!target) {
-        return { ok: true, clicked: false, countBefore: countBefore, previousUnchanged: previousUnchanged };
+        return { ok: true, clicked: false, countBefore: countBefore, previousUnchanged: previousUnchanged,
+                 healed: found.used };
       }
       var signature = signatureOf(target);
       var state = stateOf(target);
+      var label = buttonLabel(target);
+      /* Whatever is open now was there before this click. */
+      noteDialogs();
       bringIntoView(target);
       highlight(target);
       clickElement(target);
       return {
-        ok: true, clicked: true, signature: signature, state: state,
-        countBefore: countBefore, previousUnchanged: previousUnchanged
+        ok: true, clicked: true, signature: signature, state: state, label: label,
+        countBefore: countBefore, previousUnchanged: previousUnchanged, healed: found.used
       };
     }
 
@@ -1062,8 +1258,8 @@ if (window.__miniRpaLoaded) {
      * "Settled" is: no modal dialog is open, or the pattern still has usable
      * matches anyway - which covers the case where the dialog IS the list. */
     function isSettled(pattern) {
-      if (!openDialog()) return true;
-      try { return queryPattern(pattern).length > 0; } catch (e) { return true; }
+      if (!newDialog()) return true;
+      try { return queryPatternHealed(pattern).nodes.length > 0; } catch (e) { return true; }
     }
 
     function repeatSettle(pattern, timeoutMs) {
@@ -1072,7 +1268,7 @@ if (window.__miniRpaLoaded) {
         if (aborted) return Promise.resolve({ ok: true, settled: true, aborted: true });
         if (isSettled(pattern)) return Promise.resolve({ ok: true, settled: true });
         if (Date.now() >= end) {
-          return Promise.resolve({ ok: true, settled: false, dialogOpen: !!openDialog() });
+          return Promise.resolve({ ok: true, settled: false, dialogOpen: !!newDialog() });
         }
         return sleep(200).then(attempt);
       })();
@@ -1144,7 +1340,9 @@ if (window.__miniRpaLoaded) {
       if (dlg.tagName === 'DIALOG' && !dlg.hasAttribute('open')) return true;
       var rect = dlg.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return true;
-      return openDialog() !== dlg;
+      /* Judged on its own showing, not on whether it is the topmost one: a
+       * chat bubble later in the page must not make a pop-up look closed. */
+      return visibleDialogs().indexOf(dlg) === -1;
     }
 
     function waitDialogGone(dlg, timeoutMs) {
@@ -1160,7 +1358,7 @@ if (window.__miniRpaLoaded) {
      * the way, whatever else is. */
     function holdsMatches(dlg, pattern) {
       var nodes;
-      try { nodes = queryPattern(pattern); } catch (e) { return false; }
+      try { nodes = queryPatternHealed(pattern).nodes; } catch (e) { return false; }
       for (var i = 0; i < nodes.length; i++) if (containsDeep(dlg, nodes[i])) return true;
       return false;
     }
@@ -1241,7 +1439,9 @@ if (window.__miniRpaLoaded) {
         };
       }
       function cycle() {
-        var dlg = openDialog();
+        /* Only what the pass itself brought up is in the way; a panel that
+         * was open before the row was clicked is left exactly as it was. */
+        var dlg = newDialog();
         if (!dlg || holdsMatches(dlg, pattern)) return Promise.resolve(result(true));
         if (aborted || attempts >= 3) return Promise.resolve(result(false));
         attempts += 1;
@@ -1259,9 +1459,9 @@ if (window.__miniRpaLoaded) {
     function repeatRescue(pattern) {
       try { window.scrollTo(0, document.documentElement.scrollHeight); } catch (e) { /* ignore */ }
       return sleepInterruptible(RESCUE_WAIT_MS).then(function () {
-        var nodes;
-        try { nodes = queryPattern(pattern); } catch (e) { return { ok: false, error: e.message }; }
-        return { ok: true, count: nodes.length };
+        var found;
+        try { found = queryPatternHealed(pattern); } catch (e) { return { ok: false, error: e.message }; }
+        return { ok: true, count: found.nodes.length, healed: found.used };
       });
     }
 
@@ -1290,11 +1490,8 @@ if (window.__miniRpaLoaded) {
         return;
       }
       if (msg.cmd === 'countMatches') {
-        try {
-          sendResponse({ ok: true, count: queryPattern(msg.pattern).length });
-        } catch (e) {
-          sendResponse({ ok: false, error: e.message });
-        }
+        try { sendResponse(diagnosePattern(msg.pattern)); }
+        catch (e) { sendResponse({ ok: false, error: e.message }); }
         return;
       }
       if (msg.cmd === 'playStep') {

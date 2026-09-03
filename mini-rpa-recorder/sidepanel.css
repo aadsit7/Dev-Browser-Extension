@@ -597,6 +597,19 @@ body.dragging .gap.over::after {
   color: var(--ink-soft);
 }
 
+/* Why the repeat would do nothing on the page in front, said on the canvas. */
+.block-warn {
+  margin: 0 8px 6px 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  background: var(--err-bg);
+  color: var(--rec);
+}
+
+.block-warn.error { background: var(--warn-bg); color: var(--warn-ink); }
+
 /* Laid over the block's bottom edge rather than added to it, so showing it
    moves nothing. */
 .block-drop {

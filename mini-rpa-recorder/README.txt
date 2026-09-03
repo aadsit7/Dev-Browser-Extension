@@ -321,6 +321,12 @@ stops and names it rather than guess. A confirm that comes up in the wake of a
 close ("discard?") is closed the same way. If, after all that, something is
 still in the way, the loop stops and says which pop-up it could not close.
 
+A pop-up that was already open when the pass started - a chat window, a cookie
+notice, a help panel - is part of the page. It is never closed, it is never
+mistaken for the box the next step is looking for, and it cannot make a pop-up
+that is still up look closed. Only what the click itself brought up is the
+pass's own.
+
 If the pop-up has a close button the list above does not find - an icon with no
 label, an unusual wording - press "Record the button to press", bring the pop-up
 up on the page, and click that button. The next click is saved as the control,
@@ -403,13 +409,50 @@ would leave the loop with a single element and nothing to move on to. Where the
 wording carries the row's own name ("Connect with Dana Ellis"), the leading
 words are pinned instead, with :text^("Connect").
 
-This is also why the "currently matches N elements" read-out is worth a look:
-after pinning it counts the rows that still need doing, not every row on the
-page.
+This is also why the "Found N matches" read-out is worth a look: after pinning
+it counts the rows that still need doing, not every row on the page.
 
 Randomised or hashed class names are ignored on purpose - many sites regenerate
 them on every deploy, so a pattern built on them would stop working without
-warning.
+warning. Ids a framework hands out at render time (ember782, mat-input-4) are
+treated the same way: they are the same on the next visit only by luck, so a
+step never leans on one. A step recorded before this was known has its wording
+tried first and its id only as a fallback - and even then only when what the id
+lands on looks like what was recorded, so a stale id can never click a
+different button.
+
+WHEN THE COUNT IS ZERO, THE PANEL SAYS WHY
+
+A bare "0 matches" explains nothing, so a repeat block whose count is zero gets
+a line under its header on the canvas (and the drawer's read-out says the same)
+naming which of these it is:
+
+  - Nothing on the page fits the pattern at all: you are on the wrong page, or
+    the site has changed and the first step of the block wants re-recording.
+  - Elements fit the pattern but none show the wording it is pinned to - they
+    say "Pending" instead of "Connect", say. Every row here is already done, so
+    it is time for the next page.
+  - Matches are there but none can be clicked: they are behind a pop-up (which
+    is named), hidden, or disabled. Close the pop-up and the count comes back.
+  - Nothing matches as written, but the same identity on another kind of
+    element does - see the next section.
+
+SELF-HEALING PATTERNS - WHEN THE SITE CHANGES THE KIND OF ELEMENT
+
+Sites serve the same button as <a> one week and <button> the next. A pattern
+records the tag it saw, and taken literally it would find nothing after such a
+change while the rows are plainly still there. So when a pattern finds nothing
+as written, the loop tries it one notch looser - the same attributes and the
+same pinned wording, on any kind of control:
+
+    a[aria-label^="Invite"]:text("Connect")               finds nothing, so
+    :is(button, a, [role="button"], ...)[aria-label^="Invite"]:text("Connect")
+
+is used instead. Only the tag is ever loosened; an attribute or a pinned wording
+is never dropped, so the wider pattern cannot pick up a row the original would
+have refused. The count chip says "(widened)", the read-out says so, and the run
+summary notes it once - because the right fix is to re-record the first step of
+the block and have an exact pattern again.
 
 WORKED EXAMPLE
 
@@ -427,7 +470,9 @@ WORKED EXAMPLE
      it re-counts whenever you edit the pattern or switch to a different page.
      Check the number looks right BEFORE you play anything, and check it against
      the rows that still need doing rather than every row you can see. If it
-     says 0, the pattern is too narrow. If it is higher than the number of rows
+     says 0, the line under the block says why (see WHEN THE COUNT IS ZERO
+     above) - the pattern may be too narrow, or you may simply be on the wrong
+     page. If it is higher than the number of rows
      still to do, it is too broad and is probably picking up rows you have
      already actioned - widen or narrow it by hand in the "Which things to
      repeat on" box under Advanced settings.

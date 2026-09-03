@@ -916,6 +916,16 @@
     }
     block.appendChild(head);
 
+    /* Why the count is zero, right on the canvas: a person should not have
+     * to open the drawer to learn that the repeat would do nothing. */
+    if (looping) {
+      var warn = document.createElement('div');
+      warn.className = 'block-warn';
+      warn.dataset.warnFor = anchor.id;
+      applyWarn(warn, readouts[anchor.id]);
+      block.appendChild(warn);
+    }
+
     if (collapsed) {
       var note = document.createElement('div');
       note.className = 'block-collapsed-note';
@@ -1015,6 +1025,15 @@
     return /[.!?]$/.test(t) ? t : t + '.';
   }
 
+  /* The warning line under a repeat block on the canvas: shown only when the
+   * count is something to act on, so a block that is fine stays quiet. */
+  function applyWarn(node, known) {
+    var show = !!known && (known.kind === 'none' || known.kind === 'error');
+    node.hidden = !show;
+    node.className = 'block-warn' + (show ? ' ' + known.kind : '');
+    node.textContent = show ? known.text : '';
+  }
+
   function setReadout(stepId, text, kind, chipText) {
     readouts[stepId] = { text: text, kind: kind || '', chip: chipText || '…' };
     var node = el.drawer.querySelector('[data-readout-for="' + stepId + '"]');
@@ -1027,6 +1046,65 @@
       chip.className = 'count-chip' + (kind ? ' ' + kind : '');
       chip.textContent = chipText || '…';
     }
+    var warn = el.flow.querySelector('[data-warn-for="' + stepId + '"]');
+    if (warn) applyWarn(warn, readouts[stepId]);
+  }
+
+  function plural(n, word) {
+    return n + ' ' + word + (n === 1 ? '' : word === 'match' ? 'es' : 's');
+  }
+
+  /* Turns what the page reported into a sentence that says what to do. A
+   * bare "0 matches" is the one number that explains nothing: the page may
+   * be the wrong one, the rows may all be done, a pop-up may be covering
+   * them, or the site may have changed the kind of element since the
+   * recording - and each of those calls for something different. */
+  function explainCount(res) {
+    var n = res.count;
+    var where = ' on this page' + (res.tabTitle ? ' (' + trunc(res.tabTitle, 30) + ')' : '');
+    if (n > 0) {
+      return { text: 'Found ' + plural(n, 'match') + where + '.', kind: '', chip: plural(n, 'match') };
+    }
+    if (res.healedCount > 0) {
+      var h = res.healedCount;
+      return {
+        text: 'Nothing matches as written, but ' + h + (res.healedTag ? ' <' + res.healedTag + '>' : '') +
+              ' element' + (h === 1 ? '' : 's') + ' carr' + (h === 1 ? 'ies' : 'y') +
+              ' the same identity' + where + ', so the repeat will use those. The page has changed since ' +
+              'this was recorded — re-record the first step of the block to make the pattern exact again.',
+        kind: 'error',
+        chip: plural(h, 'match') + ' (widened)'
+      };
+    }
+    if (!res.raw) {
+      return {
+        text: 'Nothing' + where + ' matches. Open the page the repeat runs on, or re-record the first ' +
+              'step of the block if the page has changed.',
+        kind: 'none',
+        chip: '0 matches'
+      };
+    }
+    if (!res.worded) {
+      var say = res.samples && res.samples.length
+        ? ' They say ' + res.samples.map(function (s) { return '"' + s + '"'; }).join(', ') + ' instead, so'
+        : ' So';
+      return {
+        text: plural(res.raw, 'element') + where + ' fit the pattern, but none show the words it is pinned to.' +
+              say + ' every row here may already be done — try the next page.',
+        kind: 'none',
+        chip: '0 matches'
+      };
+    }
+    var why = [];
+    if (res.behind) why.push(res.behind + ' behind the pop-up' + (res.blocker ? ' "' + trunc(res.blocker, 30) + '"' : ''));
+    if (res.hidden) why.push(res.hidden + ' hidden');
+    if (res.disabled) why.push(res.disabled + ' disabled');
+    return {
+      text: plural(res.worded, 'match') + where + ', but none can be clicked right now: ' + why.join(', ') + '.' +
+            (res.behind ? ' Close the pop-up and the count comes back.' : ''),
+      kind: 'none',
+      chip: '0 usable'
+    };
   }
 
   function refreshCount(stepId, pattern) {
@@ -1043,14 +1121,8 @@
             ((res && res.error) || 'no answer from the page')), 'error', 'no page');
           return;
         }
-        var n = res.count;
-        setReadout(
-          stepId,
-          'Found ' + n + ' match' + (n === 1 ? '' : 'es') + ' on this page' +
-            (res.tabTitle ? ' (' + trunc(res.tabTitle, 30) + ')' : '') + '.',
-          n === 0 ? 'none' : '',
-          n + ' match' + (n === 1 ? '' : 'es')
-        );
+        var said = explainCount(res);
+        setReadout(stepId, said.text, said.kind, said.chip);
       });
     }, COUNT_DEBOUNCE_MS);
   }
@@ -1691,7 +1763,12 @@
           : 'Outlined ' + n + ' element' + (n === 1 ? '' : 's') + ' on ' + trunc(res.tabTitle, 26) +
             '. Look at the page: those are exactly what the repeat will act on' +
             (res.labels && res.labels.length ? ' (' + res.labels.slice(0, 3).join(', ') + (n > 3 ? ', …' : '') + ')' : '') + '.';
-        setReadout(id, text, n === 0 ? 'none' : '', n + ' match' + (n === 1 ? '' : 'es'));
+        if (n > 0 && res.healed) {
+          text += ' Nothing matched as written; these carry the same identity on another kind of element, ' +
+                  'so re-record the first step of the block to make the pattern exact again.';
+        }
+        setReadout(id, text, n === 0 ? 'none' : res.healed ? 'error' : '',
+                   n + ' match' + (n === 1 ? '' : 'es') + (n > 0 && res.healed ? ' (widened)' : ''));
       });
       return;
     }
