@@ -266,8 +266,23 @@ function waitForTabLoad(tabId) {
  * so a loose match can be reported back to the user. */
 function resolveTab(url, title) {
   var target = parseUrl(url);
-  return chrome.tabs.query({}).then(function (tabs) {
+  return Promise.all([
+    chrome.tabs.query({}),
+    chrome.tabs.query({ active: true }).catch(function () { return []; }),
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(function () { return []; })
+  ]).then(function (r) {
+    var tabs = r[0];
+    var rank = {};
+    r[1].forEach(function (t) { rank[t.id] = 1; });
+    r[2].forEach(function (t) { rank[t.id] = 2; });
     var usable = tabs.filter(function (t) { return typeof t.id === 'number' && t.id >= 0; });
+    /* Among tabs that match equally well, the one in front is the one the
+     * user means. Two search tabs on the same site match the same at the
+     * "same page" level, and taking whichever Chrome lists first sent runs
+     * to a tab the user was not even looking at. */
+    usable = usable.map(function (t, i) { return { t: t, i: i, r: rank[t.id] || 0 }; })
+      .sort(function (a, b) { return (b.r - a.r) || (a.i - b.i); })
+      .map(function (x) { return x.t; });
 
     var tests = [
       ['exact', function (t) { return t.url === url; }],
@@ -815,6 +830,9 @@ function runRepeatPass(step, index, steps, tabId) {
   var sameRun = 0;          /* how many rows running the same pop-up has come up on */
   var lastPopup = null;
   var previousPassedOver = false;
+  var tabTitle = '';        /* which tab the pass is running on, for the summary */
+  var lastLabel = '';       /* what the last round clicked, for the summary */
+  var healedUsed = '';      /* the widened pattern, when the recorded one found nothing */
   /* Scrolling to load more is the right first guess on an endless list, but
    * where a next-page control was recorded the page is paged, not endless -
    * one scroll that reveals nothing settles it, and the rest would be six
@@ -882,16 +900,52 @@ function runRepeatPass(step, index, steps, tabId) {
     });
   }
 
+  /* "Clicks are not having an effect" is the message people see most when a
+   * run goes wrong, so it says what was clicked, where, and what that usually
+   * means, rather than leaving them to guess. */
+  function stallText() {
+    var what = lastLabel ? '"' + clip(lastLabel, 40) + '"' : 'the matching element';
+    var text = 'Clicks are not having an effect — stopped after ' + rounds + ' rounds. Each round clicked ' +
+               what + (tabTitle ? ' on the tab "' + clip(tabTitle, 40) + '"' : '') +
+               (followers.length
+                 ? ' and then ran the ' + followers.length + ' step' + (followers.length === 1 ? '' : 's') +
+                   ' after it'
+                 : '') +
+               ', and the element looked exactly the same afterwards. That happens when the page ignores ' +
+               'simulated clicks, when the pop-up the next step needs did not open, or when the run is on ' +
+               'a different tab from the one you are looking at.';
+    if (healedUsed) {
+      text += ' The match pattern found nothing as written and was widened to ' + healedUsed + '.';
+    }
+    return text;
+  }
+
+  /* The recorded pattern found nothing, but the same identity on another
+   * kind of control did: say so once, because the page has changed since the
+   * recording and the user should know to re-record the step. */
+  function noteHealed(used) {
+    if (!used || healedUsed) return Promise.resolve(null);
+    healedUsed = used;
+    return addRunNote('Step ' + (index + 1) + ': the match pattern found nothing as written (' + cfg.pattern +
+                      '), but the same identity on other controls did (' + used + '), so the run used that. ' +
+                      'The page has changed since this was recorded - re-record the first step of the block ' +
+                      'to make the pattern exact again.');
+  }
+
   /* Whether the matches can be told apart decides how the loop knows it is
    * making progress: distinguishable elements are tracked individually, and
    * anything else falls back to watching the pool shrink. */
   function probe() {
-    return ask({ cmd: 'repeatProbe', pattern: cfg.pattern }).then(function (out) {
+    return chrome.tabs.get(tabId).then(function (t) {
+      tabTitle = (t && (t.title || hostOf(t.url))) || '';
+    }).catch(function () { tabTitle = ''; }).then(function () {
+      return ask({ cmd: 'repeatProbe', pattern: cfg.pattern });
+    }).then(function (out) {
       if (!out || out.ok === false) {
         return { ok: false, error: (out && out.error) || 'the page did not answer' };
       }
       useSignatures = !!out.distinct;
-      return { ok: true };
+      return noteHealed(out.healed).then(function () { return { ok: true }; });
     });
   }
 
@@ -1073,10 +1127,10 @@ function runRepeatPass(step, index, steps, tabId) {
            * even though the row it was on looks exactly as it did. */
           if (out.previousUnchanged && !previousPassedOver) noEffect += 1;
           else noEffect = 0;
-          if (noEffect >= STALL_LIMIT) {
-            return finish('Clicks are not having an effect — stopped after ' + rounds + ' rounds.');
-          }
+          if (noEffect >= STALL_LIMIT) return finish(stallText());
         }
+        if (out.label) lastLabel = out.label;
+        if (out.healed && !healedUsed) noteHealed(out.healed);
 
         if (!out.clicked) {
           if (rescues >= scrollBudget) return turnPage();
@@ -1109,9 +1163,7 @@ function runRepeatPass(step, index, steps, tabId) {
           if (lastCount >= 0 && out.countBefore >= lastCount) stall += 1;
           else stall = 0;
           lastCount = out.countBefore;
-          if (stall >= STALL_LIMIT) {
-            return finish('Clicks are not having an effect — stopped after ' + rounds + ' rounds.');
-          }
+          if (stall >= STALL_LIMIT) return finish(stallText());
         }
 
         rounds += 1;
@@ -1672,7 +1724,8 @@ function previewPattern(pattern) {
       .then(function (out) {
         if (!out) return { ok: false, error: 'The page did not answer.' };
         if (out.ok === false) return out;
-        return { ok: true, count: out.count, labels: out.labels, tabTitle: tab.title || hostOf(tab.url) };
+        return { ok: true, count: out.count, labels: out.labels, healed: out.healed || '',
+                 tabTitle: tab.title || hostOf(tab.url) };
       })
       .catch(function (e) { return { ok: false, error: errText(e) }; });
   });
@@ -1693,7 +1746,9 @@ function countMatches(pattern) {
     }).then(function (out) {
       if (!out) return { ok: false, error: 'The page did not answer.' };
       if (out.ok === false) return out;
-      return { ok: true, count: out.count, tabTitle: tab.title || hostOf(tab.url) };
+      /* Everything the page could say about the count goes through, so the
+       * panel can explain a zero rather than just show one. */
+      return Object.assign({}, out, { ok: true, tabTitle: tab.title || hostOf(tab.url) });
     }).catch(function (e) {
       return { ok: false, error: errText(e) };
     });
