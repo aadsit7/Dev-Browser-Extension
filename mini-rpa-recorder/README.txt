@@ -1,13 +1,14 @@
 MINI RPA RECORDER
 =================
 
-A small record-and-replay tool for web pages. Press Start, do a handful of
+A small record-and-replay tool for web pages. Press Record, do a handful of
 things across one or more tabs, press Stop, then press Play to have those same
-things done again. One click step can be switched to "Repeat" so it runs against
-every matching element on the page instead of just the one you clicked. A
-recording can be saved under a name and brought back later, so you can keep
-several jobs and pick the one you need, and exported to a file to back it up or
-hand it on.
+things done again - or build the flow step by step from a catalog of actions,
+the way a workflow designer does it. A block of steps can be set to "Repeat"
+so it runs against every matching element on the page, turning the page when
+one runs out. A flow can be saved under a name and brought back later, so you
+can keep several jobs and pick the one you need, and exported to a file to
+back it up or hand it on.
 
 Manifest V3. No frameworks, no libraries, no network calls - it works offline.
 
@@ -59,9 +60,27 @@ between tabs.
       recording still reads as one flow. Click any card to see everything
       about it.
 
-      Press "Take a picture" at any point during recording to capture the
-      visible part of the current tab. It appears as a card with a thumbnail.
-      Pictures are reference images only - they are skipped during playback.
+      Press "Picture" at any point during recording to capture the visible
+      part of the current tab. It appears as a card with a thumbnail. Pictures
+      are reference images only - they are skipped during playback.
+
+  Add a step without recording
+      The flow runs from a Start node to an End node, and every line between
+      cards carries a "+". Press one and a catalog of actions comes up:
+
+          Click something        Type into a box       Press a key
+          Scroll                 Wait                  Open a page
+          Repeat for each match
+
+      and, inside a repeat block or right after one, "Go to the next page"
+      and "Close a pop-up". Pick one and the panel tells you what to do: for
+      a click, a key, typing or a scroll you go and do that one thing on the
+      page, and it lands in the flow exactly where the "+" was (typing and
+      scrolling carry on until you press Done, because they arrive as a
+      stream). A wait or a web address goes straight in, with a drawer to set
+      the seconds or the address. "Repeat for each match" asks you to click
+      one of the things to repeat on, and the others like it are found for
+      you. Section 5 has more on the catalog.
 
   Change a step
       Click a card and a drawer slides up with everything about that step:
@@ -94,8 +113,8 @@ between tabs.
   Tidy up
       Click a card and press "Delete this step"; an "Undo" appears in case
       that was not what you meant - it puts the step back where it was, along
-      with any block that shrank around it. "Clear all", at the top of the
-      flow, wipes the whole recording (it asks for a second click first).
+      with any block that shrank around it. "Clear", at the top of the flow,
+      wipes the whole flow (it asks for a second click first).
 
   Stop
       Press "Stop recording". The recording is saved and survives closing the
@@ -109,16 +128,21 @@ between tabs.
       including part way through a repeat, not just between steps.
 
   Keep it
-      Give the recording a name in "Saved recordings", under the flow, and
-      press Save. It stays on that list however many other jobs you record
-      after it, and Load brings it back. Section 3 has the details.
+      Give the flow a name in "Saved flows", under the flow, and press Save.
+      It stays on that list however many other jobs you record after it, and
+      Load brings it back. Section 3 has the details.
+
+  Help
+      The "?" in the top bar opens the only paragraphs the panel has: what
+      Record, "+" and a Repeat block do, and the speed limits. Everything else
+      the panel says is one line where it is needed.
 
 
 -------------------------------------------------------------------------------
-3. SAVED RECORDINGS
+3. SAVED FLOWS
 -------------------------------------------------------------------------------
 
-The flow holds one recording at a time. "Saved recordings", just under it,
+The flow holds one recording at a time. "Saved flows", just under it,
 is where you keep the ones you want to come back to, so setting up a second job
 does not cost you the first. The section opens by itself once there is
 something to save or something saved; the triangle on its header folds it away.
@@ -189,9 +213,8 @@ steps are put in a REPEAT BLOCK for you - drawn on the canvas as a container
 round its cards, with a header that says "Repeat for each match" and a live
 count of how many elements match - and the panel says so:
 
-    Set to repeat: those 2 steps are in a block that will run on every match
-    found, scrolling down for more as it goes. Click the block to change that
-    or turn it off.
+    Set to repeat: those 2 steps will run on every match on the page. Click
+    the block to change that.
 
 So the whole job is: record Connect, confirm in the pop-out, stop, press Play.
 
@@ -256,21 +279,29 @@ says as it does it.
 
 WHEN THIS PAGE RUNS OUT
 
-The drawer of a repeating block carries one more line, under the repeat count:
+A repeating block carries a line of its own at its foot, on the canvas:
 
-    When this page runs out    stop    [+ Go to the next page]
+    + Go to the next page when this one runs out
 
 Left alone, the loop stops when the page has nothing left - which is what it
-has always done. Press "+ Go to the next page" and the panel waits while you go
-to the page and click the control that brings up the next one: Next, a chevron,
-"Load more", whatever the site calls it. The next thing you click is saved as
-that control.
+has always done. Press that line (or pick "Go to the next page" from the
+catalog inside the block) and the panel waits while you go to the page and
+click the control that brings up the next one: Next, a chevron, "Load more",
+whatever the site calls it. The next thing you click is saved as that control.
 
-Nothing else changes. It is not added as a step, the steps you recorded are
-untouched, and a loop that was already set up keeps its pattern, its count and
-its timing. The line then reads:
+This is deliberately not a step. A "Click 'Next'" card after the block would
+run once, when the block has finished, and the run would end on page two;
+the block's own next-page control is pressed every time the page runs out,
+so the repeat carries on page after page up to its limit.
 
-    When this page runs out    click 'Next'    [Change] [Remove]
+Nothing else changes. The steps you recorded are untouched, and a loop that
+was already set up keeps its pattern, its count and its timing. The line on
+the block then reads:
+
+    When this page runs out: go to the next page ('Next')
+
+and pressing it opens the block's drawer, where "Change" records a different
+control and "Remove" goes back to stopping.
 
 From then on, when the page runs out the loop presses that control, waits for
 the new rows to arrive, and carries straight on there. "Remove" puts it back to
@@ -533,8 +564,35 @@ A pass finishes before the next one starts. That matters most when a dialog is
 involved: the loop waits for it to close again before looking for the next
 element, because starting the next pass while the page is still covered means
 the click lands on nothing and, by the time the dialog does appear, it belongs
-to the wrong row. If a dialog is still up eight seconds after a pass ends, the
-loop stops and says so rather than clicking blind.
+to the wrong row. Only what the pass itself brought up counts here - a chat
+window or a cookie notice that was open all along is part of the page - and
+it counts whether or not the site declares it modal, because plenty do not.
+If the pop-up is still up eight seconds after a pass ends, the loop stops and
+says which pop-up, and which click in it did nothing.
+
+EVERY CLICK IS WATCHED
+
+A click that the page ignores used to look exactly like one that worked. Now
+every click in a pass is watched for its effect: a pop-up appearing, the
+element changing or going away, the pop-up it sat in closing, the address
+changing, or - failing all of those - anything at all changing in the
+document. When nothing whatever happens within a second and a half, the
+element is clicked once more the way a person would, at the exact point a
+mouse would land on, which is where some pages listen. What was seen goes into
+the run summary, so "Clicks are not having an effect" now says which of these
+it was:
+
+  - the click opened nothing and changed nothing, even on the second try -
+    the page is ignoring simulated clicks on that element;
+  - the pop-up came up, but the click inside it left it open - the page is
+    ignoring that button, or the pop-up now asks for something first;
+  - the pop-up came up and went away on every round, yet the rows never
+    changed - the site is taking the clicks but not changing the rows, which
+    is what a reached limit looks like.
+
+A pop-up that came up and went away is taken as proof that the pass worked,
+whatever the row looks like afterwards, so a site that only updates its rows
+on reload no longer trips the stall guard.
 
 "If a step in the pass is missing" decides what happens when a step cannot be
 found - a dialog that never opened, a button that moved:
@@ -567,15 +625,19 @@ The loop stops when any of these happens:
   - STALL GUARD: the clicks are having no effect. Where matches are
     indistinguishable that shows up as the number of matching elements failing
     to go down for three rounds; where they can be told apart it shows up as the
-    element clicked last round being completely unchanged three rounds running.
-    Either way it reports "Clicks are not having an effect - stopped after N
-    rounds." This is what stops it spinning forever on a page that quietly
-    ignores simulated clicks.
-  - a step in the pass cannot be found and "If a step is missing" is set to stop;
+    element clicked last round being completely unchanged three rounds running,
+    with no pop-up having come and gone in between. It reports "Clicks are not
+    having an effect - stopped after N rounds" followed by what was actually
+    seen (see EVERY CLICK IS WATCHED above). This is what stops it spinning
+    forever on a page that quietly ignores simulated clicks.
+  - a step in the pass cannot be found and "If a step is missing" is set to
+    stop - and if the click before it did nothing at all, the summary says so
+    first, because that is why the step had nothing to act on;
   - with "If a step is missing" set to close the pop-up: the same pop-up has
     come up on five rows in a row, a pop-up could not be closed, or a row was
     given up on in a list whose rows cannot be told apart;
-  - a dialog is still open eight seconds after a pass finished;
+  - the pop-up a pass brought up is still open eight seconds after the pass
+    finished;
   - the follow-on steps in a pass stop being found altogether, which means the
     page is no longer behaving the way it did when you recorded.
 
@@ -600,7 +662,54 @@ them.
 
 
 -------------------------------------------------------------------------------
-5. HOW TABS ARE MATCHED AT PLAYBACK
+5. THE CATALOG
+-------------------------------------------------------------------------------
+
+Every "+" on the flow opens the same catalog, and where you pressed it is
+where the step lands: the drawer's subtitle says "after step 3", "at the
+start", "into the repeat block".
+
+  Click something / Press a key
+      The panel switches to "Adding a step" and the page shows a badge saying
+      what it is waiting for. Go and click the thing (or press Enter, Tab or
+      Escape in the box), and that one action goes in. Scrolling to reach it
+      is fine - only the kind of action asked for is taken, so a scroll on the
+      way to a button, or the click into a box before typing, is not the step.
+
+  Type into a box / Scroll
+      These arrive as a stream - keystroke after keystroke, tick after tick -
+      so the capture carries on until you press Done, and Cancel takes out
+      whatever was captured so far.
+
+  Wait
+      Goes straight in, set to 2 seconds, with its drawer open so you can
+      change that. A wait needs no page, so it runs wherever it sits.
+
+  Open a page
+      Goes straight in with an empty address and its drawer open. Type the
+      address (https:// is added if you leave it off). At playback the tab the
+      step belongs to is sent there, and the step is done once the page has
+      loaded.
+
+  Repeat for each match
+      Offered outside a block. Click one of the things to repeat on, and a
+      repeat block is made round that click with its pattern worked out from
+      the element, exactly as after a recording; add the rest of the pass with
+      the "+ Add a step" inside the block.
+
+  Go to the next page / Close a pop-up
+      Offered inside a repeat block or right after one. They are not steps:
+      the first records the block's next-page control (see WHEN THIS PAGE RUNS
+      OUT), the second sets "If a step is missing" to close the pop-up and
+      records the button that closes it.
+
+Everything the catalog adds can be moved, grouped, re-recorded (where it came
+from the page) and deleted like any recorded step, and Record still works
+exactly as before for capturing a whole job in one go.
+
+
+-------------------------------------------------------------------------------
+6. HOW TABS ARE MATCHED AT PLAYBACK
 -------------------------------------------------------------------------------
 
 The recording never stores raw tab IDs - those change every time Chrome
@@ -625,11 +734,11 @@ so a loose match is never something that quietly happened without you knowing.
 
 
 -------------------------------------------------------------------------------
-6. WHERE THINGS ARE SAVED
+7. WHERE THINGS ARE SAVED
 -------------------------------------------------------------------------------
 
 The recording lives in chrome.storage.local, so it survives closing the panel
-and restarting the browser. Saved recordings live there too: a small index of
+and restarting the browser. Saved flows live there too: a small index of
 names and sizes under one key, and each recording's steps under a key of its
 own, so listing them never has to read every screenshot ever saved. Playback
 position and the repeat counter live in chrome.storage.session, so a page
@@ -644,7 +753,7 @@ steps at that point, or the next save will fail.
 
 
 -------------------------------------------------------------------------------
-7. LIMITATIONS - PLEASE READ
+8. LIMITATIONS - PLEASE READ
 -------------------------------------------------------------------------------
 
 This is a browser extension, so it lives inside web pages. That sets some hard
@@ -721,7 +830,7 @@ boundaries:
 
 
 -------------------------------------------------------------------------------
-8. FILES
+9. FILES
 -------------------------------------------------------------------------------
 
   manifest.json    Manifest V3 definition, permissions, side panel wiring

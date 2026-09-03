@@ -305,17 +305,29 @@ if (window.__miniRpaLoaded) {
      * counts as the pass's own, whether that is where its next step is looked
      * for or what "close the pop-up" closes. */
     var dialogsBefore = [];
+    /* What the pass has seen of its own pop-up so far: whether one came up,
+     * and whether it has gone again. A pop-up that came and went is proof the
+     * clicks are being honoured, whatever the row looks like afterwards. */
+    var passSeen = { dialog: false, gone: false, heading: '' };
 
     function noteDialogs() {
       dialogsBefore = visibleDialogs();
+      passSeen = { dialog: false, gone: false, heading: '' };
     }
 
     function newDialog() {
       var open = visibleDialogs();
+      var found = null;
       for (var i = open.length - 1; i >= 0; i--) {
-        if (dialogsBefore.indexOf(open[i]) === -1) return open[i];
+        if (dialogsBefore.indexOf(open[i]) === -1) { found = open[i]; break; }
       }
-      return null;
+      if (found) {
+        passSeen.dialog = true;
+        if (!passSeen.heading) passSeen.heading = dialogHeading(found);
+      } else if (passSeen.dialog) {
+        passSeen.gone = true;
+      }
+      return found;
     }
 
     /* A dialog that takes over the page: everything outside it is unreachable
@@ -608,12 +620,28 @@ if (window.__miniRpaLoaded) {
       recording: '● REC',
       redo: '● REDO',
       nextpage: '● NEXT PAGE',
-      dismiss: '● CLOSE BUTTON'
+      dismiss: '● CLOSE BUTTON',
+      add: '● ADD A STEP'
+    };
+    /* Adding one step from the catalog: the badge says what is wanted. */
+    var ADD_BADGES = {
+      click: '● CLICK THE THING',
+      input: '● TYPE INTO THE BOX',
+      key: '● PRESS THE KEY',
+      scroll: '● SCROLL, THEN DONE'
     };
 
-    function setRecording(on, mode) {
+    function badgeFor(mode, spec) {
+      if (mode === 'add') {
+        var kind = spec && spec.kinds && spec.kinds[0];
+        return ADD_BADGES[kind] || LISTENING.add;
+      }
+      return LISTENING[mode] || '● REC';
+    }
+
+    function setRecording(on, mode, spec) {
       recording = !!on;
-      if (recording) showBadge(LISTENING[mode] || '● REC');
+      if (recording) showBadge(badgeFor(mode, spec));
       else hideBadge();
     }
 
@@ -621,16 +649,17 @@ if (window.__miniRpaLoaded) {
       return Object.prototype.hasOwnProperty.call(LISTENING, String(mode));
     }
 
-    try {
-      chrome.storage.local.get('mode').then(function (data) {
+    function followMode() {
+      return chrome.storage.local.get(['mode', 'addSpec']).then(function (data) {
         var m = data && data.mode;
-        setRecording(listensIn(m), m);
+        setRecording(listensIn(m), m, data && data.addSpec);
       }).catch(function () {});
+    }
+
+    try {
+      followMode();
       chrome.storage.onChanged.addListener(function (changes, area) {
-        if (area === 'local' && changes.mode) {
-          var m = changes.mode.newValue;
-          setRecording(listensIn(m), m);
-        }
+        if (area === 'local' && (changes.mode || changes.addSpec)) followMode();
       });
     } catch (e) { /* storage unavailable - stay idle */ }
 
@@ -783,9 +812,27 @@ if (window.__miniRpaLoaded) {
 
     /* --------------------------------------------------------- interactions */
 
-    function clickElement(el) {
+    function centreOf(el) {
+      var r = el.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    }
+
+    /* A click as the page would see one from a mouse: pointer and mouse
+     * events in order, at the element's centre, then the click itself. With
+     * how === 'deep' the events go to whatever is drawn at that centre point
+     * inside the element - the span in a button, the icon in a link - which
+     * is where a real click lands and where some pages listen. */
+    function clickElement(el, how) {
+      var p = centreOf(el);
+      var target = el;
+      if (how === 'deep') {
+        var under = null;
+        try { under = document.elementFromPoint(p.x, p.y); } catch (e) { under = null; }
+        if (under && under !== el && containsDeep(el, under)) target = under;
+      }
       try { el.focus({ preventScroll: true }); } catch (e) { /* not focusable */ }
-      var base = { bubbles: true, cancelable: true, composed: true, view: window, button: 0 };
+      var base = { bubbles: true, cancelable: true, composed: true, view: window, button: 0,
+                   clientX: p.x, clientY: p.y, screenX: p.x, screenY: p.y, detail: 1 };
       function mouse(type, buttons) {
         var init = Object.assign({}, base, { buttons: buttons });
         try {
@@ -797,12 +844,12 @@ if (window.__miniRpaLoaded) {
         return new MouseEvent(type, init);
       }
       var down = mouse('pointerdown', 1);
-      if (down) el.dispatchEvent(down);
-      el.dispatchEvent(new MouseEvent('mousedown', Object.assign({}, base, { buttons: 1 })));
+      if (down) target.dispatchEvent(down);
+      target.dispatchEvent(new MouseEvent('mousedown', Object.assign({}, base, { buttons: 1 })));
       var up = mouse('pointerup', 0);
-      if (up) el.dispatchEvent(up);
-      el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
-      el.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
+      if (up) target.dispatchEvent(up);
+      target.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+      target.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
     }
 
     /* Use the native value setter so React (and anything else that wraps the
@@ -917,7 +964,7 @@ if (window.__miniRpaLoaded) {
       return bits.join(', ');
     }
 
-    function playStep(step, timeoutMs) {
+    function playStep(step, timeoutMs, watch) {
       var wait = timeoutMs > 0 ? timeoutMs : ELEMENT_TIMEOUT_MS;
       if (step.type === 'scroll') {
         var y = Number(step.value);
@@ -941,6 +988,9 @@ if (window.__miniRpaLoaded) {
         }
         bringIntoView(el);
         highlight(el);
+        /* Inside a pass the caller asks afterwards whether this click did
+         * anything, so the watch is set before it happens. */
+        if (watch && step.type === 'click') armWatch(el);
         var isPassword = (step.attrs && step.attrs.type === 'password') ||
                          String(el.type || '').toLowerCase() === 'password';
         if (step.type === 'input' && isPassword && !step.value) {
@@ -1210,6 +1260,96 @@ if (window.__miniRpaLoaded) {
       return null;
     }
 
+    /* ---- did that click do anything? ------------------------------------ */
+
+    /* What a working click could be expected to change: the element itself,
+     * the dialog it sits in, which dialogs are open, the page's address - or,
+     * failing all of those, anything at all in the document. */
+    function snapshotAround(el) {
+      var dlg = null;
+      try { dlg = closestDeep(el, '[role="dialog"], [aria-modal="true"], dialog'); } catch (e) { dlg = null; }
+      return { state: stateOf(el), inDialog: dlg, dialogs: visibleDialogs().length, href: location.href };
+    }
+
+    function reactionSince(el, snap) {
+      try {
+        if (location.href !== snap.href) return 'navigated';
+        if (!el.isConnected) return 'gone';
+        if (snap.inDialog && dialogGone(snap.inDialog)) return 'dialog-closed';
+        if (stateOf(el) !== snap.state) return 'changed';
+        var fresh = newDialog();
+        if (fresh && fresh !== snap.inDialog) return 'dialog';
+        if (visibleDialogs().length !== snap.dialogs) return 'dialogs';
+      } catch (e) { return 'error'; }
+      return '';
+    }
+
+    var lastClick = null;
+
+    /* Watches the page from just before a click: whatever the click changes
+     * is the evidence that the page honoured it. Our own outline on the
+     * element and our badge do not count. */
+    function armWatch(el) {
+      if (lastClick) lastClick.stop();
+      var mutated = false;
+      var observer = null;
+      try {
+        observer = new MutationObserver(function (list) {
+          for (var i = 0; i < list.length && !mutated; i++) {
+            var m = list[i];
+            var t = m.target;
+            if (t === el && m.type === 'attributes' && m.attributeName === 'style') continue;
+            if (t && t.nodeType === 1 && isOurBadge(t)) continue;
+            mutated = true;
+          }
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+      } catch (e) { observer = null; }
+      lastClick = {
+        el: el,
+        label: buttonLabel(el),
+        snap: snapshotAround(el),
+        retried: false,
+        mutated: function () { return mutated; },
+        stop: function () {
+          if (observer) { try { observer.disconnect(); } catch (e) { /* ignore */ } observer = null; }
+        }
+      };
+      return lastClick;
+    }
+
+    /* Waits for the last click to have an effect. Nothing at all within the
+     * time - the element unchanged, no dialog, not one change anywhere in the
+     * document - gets one more click, the way a person would, at the exact
+     * point a mouse would land on. Answers what was seen. */
+    function repeatWatch(timeoutMs) {
+      var lc = lastClick;
+      if (!lc) return Promise.resolve({ ok: true, reaction: 'unknown', retried: false, label: '' });
+      var wait = timeoutMs > 0 ? timeoutMs : 1500;
+      var end = Date.now() + wait;
+      function done(reaction) {
+        lc.stop();
+        if (lastClick === lc) lastClick = null;
+        return { ok: true, reaction: reaction, retried: lc.retried, label: lc.label };
+      }
+      return (function look() {
+        var r = reactionSince(lc.el, lc.snap);
+        if (!r && lc.mutated()) r = 'page';
+        if (r) return Promise.resolve(done(r));
+        if (aborted) return Promise.resolve(done(''));
+        if (Date.now() >= end) {
+          if (!lc.retried && lc.el.isConnected && isUsable(lc.el)) {
+            lc.retried = true;
+            try { clickElement(lc.el, 'deep'); } catch (e) { return Promise.resolve(done('')); }
+            end = Date.now() + wait;
+            return sleep(120).then(look);
+          }
+          return Promise.resolve(done(''));
+        }
+        return sleep(120).then(look);
+      })();
+    }
+
     function repeatClickNext(pattern, handled, useSignatures, previous) {
       var found = queryPatternHealed(pattern);
       var nodes = found.nodes;
@@ -1243,6 +1383,7 @@ if (window.__miniRpaLoaded) {
       noteDialogs();
       bringIntoView(target);
       highlight(target);
+      armWatch(target);
       clickElement(target);
       return {
         ok: true, clicked: true, signature: signature, state: state, label: label,
@@ -1257,19 +1398,31 @@ if (window.__miniRpaLoaded) {
      *
      * "Settled" is: no modal dialog is open, or the pattern still has usable
      * matches anyway - which covers the case where the dialog IS the list. */
+    /* "Settled" is: nothing the pass brought up is still open - unless what it
+     * brought up IS the list, in which case it is the page. A pop-up that does
+     * not declare itself modal (plenty do not) still counts: it appeared
+     * because of the click, and the next round must not start underneath it. */
     function isSettled(pattern) {
-      if (!newDialog()) return true;
-      try { return queryPatternHealed(pattern).nodes.length > 0; } catch (e) { return true; }
+      var dlg = newDialog();
+      if (!dlg) return true;
+      return holdsMatches(dlg, pattern);
+    }
+
+    function settleReport(settled) {
+      var dlg = settled ? null : newDialog();
+      return {
+        ok: true, settled: settled, dialogOpen: !!dlg,
+        heading: dlg ? dialogHeading(dlg) : '',
+        popup: passSeen.dialog, popupGone: passSeen.gone, popupHeading: passSeen.heading
+      };
     }
 
     function repeatSettle(pattern, timeoutMs) {
       var end = Date.now() + (timeoutMs > 0 ? timeoutMs : 8000);
       return (function attempt() {
-        if (aborted) return Promise.resolve({ ok: true, settled: true, aborted: true });
-        if (isSettled(pattern)) return Promise.resolve({ ok: true, settled: true });
-        if (Date.now() >= end) {
-          return Promise.resolve({ ok: true, settled: false, dialogOpen: !!newDialog() });
-        }
+        if (aborted) return Promise.resolve(Object.assign(settleReport(true), { aborted: true }));
+        if (isSettled(pattern)) return Promise.resolve(settleReport(true));
+        if (Date.now() >= end) return Promise.resolve(settleReport(false));
         return sleep(200).then(attempt);
       })();
     }
@@ -1496,7 +1649,7 @@ if (window.__miniRpaLoaded) {
       }
       if (msg.cmd === 'playStep') {
         aborted = false;
-        playStep(msg.step, msg.timeoutMs).then(sendResponse).catch(function (e) {
+        playStep(msg.step, msg.timeoutMs, !!msg.watch).then(sendResponse).catch(function (e) {
           sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
         });
         return true;
@@ -1514,6 +1667,12 @@ if (window.__miniRpaLoaded) {
       }
       if (msg.cmd === 'repeatSettle') {
         repeatSettle(msg.pattern, msg.timeoutMs).then(sendResponse).catch(function (e) {
+          sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
+        });
+        return true;
+      }
+      if (msg.cmd === 'repeatWatch') {
+        repeatWatch(msg.timeoutMs).then(sendResponse).catch(function (e) {
           sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
         });
         return true;

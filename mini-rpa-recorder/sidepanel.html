@@ -10,16 +10,24 @@
 
 <header class="topbar">
   <div class="topbar-row">
-    <h1 class="title">Mini RPA Recorder</h1>
+    <h1 class="title">Mini RPA</h1>
     <div id="statusLine" class="status status-idle" role="status" aria-live="polite">
       <span id="statusMode" class="status-mode">Idle</span>
     </div>
+    <button type="button" id="btnHelp" class="icon-btn" title="How it works" aria-label="How it works"
+            aria-expanded="false">?</button>
   </div>
   <div id="statusDetail" class="status-detail"></div>
   <div id="repeatLine" class="repeat-line" hidden></div>
 </header>
 
-<p id="guide" class="guide"></p>
+<div id="help" class="help" hidden>
+  <p><b>Record</b> does the job once on the page and turns it into steps. <b>+</b> adds one step from the
+    catalog. A <b>Repeat</b> block runs its steps on every match on the page, and turns the page when you give
+    it the next-page button.</p>
+  <p>A repeat never runs more than <b>100</b> times or faster than one click every <b>0.5 seconds</b>: many
+    websites restrict accounts for rapid automatic clicking.</p>
+</div>
 
 <section class="controls" aria-label="Controls">
   <div class="btn-row">
@@ -27,7 +35,7 @@
     <button type="button" id="btnStopRec" class="btn btn-stop">■ Stop recording</button>
     <button type="button" id="btnPlay" class="btn btn-play">▶ Play</button>
     <button type="button" id="btnStopPlay" class="btn btn-stop">■ Stop</button>
-    <button type="button" id="btnShot" class="btn btn-shot">Take a picture</button>
+    <button type="button" id="btnShot" class="btn btn-shot">Picture</button>
   </div>
 </section>
 
@@ -40,44 +48,36 @@
   <div class="flow-head">
     <h2 class="section-title">Flow</h2>
     <span id="stepCount" class="pill">0</span>
-    <button type="button" id="btnClear" class="link-btn flow-clear">Clear all</button>
+    <span id="libraryLoaded" class="flow-name" hidden></span>
+    <button type="button" id="btnClear" class="link-btn flow-clear">Clear</button>
   </div>
   <p id="flowHint" class="flow-hint" hidden></p>
-  <p id="emptyMsg" class="empty">Your steps will show up here as cards, one per thing you do.</p>
-  <div id="flow" class="flow" aria-label="Recorded steps"></div>
+  <div id="flow" class="flow" aria-label="The flow"></div>
 </section>
 
-<section class="library" aria-label="Saved recordings">
+<section class="library" aria-label="Saved flows">
   <details id="libraryBox" class="library-box">
     <summary class="library-head">
-      <span class="section-title">Saved recordings</span>
+      <span class="section-title">Saved flows</span>
       <span id="libraryCount" class="pill">0</span>
-      <span id="libraryLoaded" class="library-loaded" hidden></span>
     </summary>
     <div class="save-row">
-      <input type="text" id="saveName" class="save-name" placeholder="Name this flow to keep it…"
+      <input type="text" id="saveName" class="save-name" placeholder="Name this flow…"
              maxlength="80" spellcheck="false" autocomplete="off"
-             aria-label="Name for the saved recording">
+             aria-label="Name for the saved flow">
       <button type="button" id="btnSave" class="btn btn-small btn-save">Save</button>
     </div>
-    <p id="libraryEmpty" class="library-empty">Nothing saved yet. Save the flow above under a name and it
-      stays here, so you can record another job and come back to this one later.</p>
-    <ul id="libraryList" class="library-list" aria-label="Saved recordings"></ul>
+    <p id="libraryEmpty" class="library-empty">Save the flow under a name to keep it here.</p>
+    <ul id="libraryList" class="library-list" aria-label="Saved flows"></ul>
     <div class="library-foot">
       <button type="button" id="btnImport" class="link-btn">Import from a file…</button>
       <button type="button" id="btnExportCurrent" class="link-btn">Export this flow</button>
       <span id="storageUse" class="storage-use"
-            title="Saved recordings and the current flow share this space. Pictures are what fills it."></span>
+            title="Saved flows and the current flow share this space. Pictures are what fills it."></span>
     </div>
     <input type="file" id="importFile" accept=".json,application/json" hidden>
   </details>
 </section>
-
-<footer class="foot">
-  <p><strong>Speed limits, on purpose.</strong> A repeat never runs more than <strong>100</strong> times
-  or faster than one click every <strong>0.5&nbsp;seconds</strong>, because many websites restrict
-  accounts for rapid automatic clicking.</p>
-</footer>
 
 <div id="drawer" class="drawer" role="dialog" aria-label="Step details" hidden></div>
 
